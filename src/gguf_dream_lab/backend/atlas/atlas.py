@@ -29,6 +29,22 @@ class StatePoint:
     phase: str = "HYPNAGOGIC"
     density: float = 0.0
     recurrence: int = 0
+    attractor_id: str = ""
+    visit_count: int = 1
+    dwell_time: float = 0.0
+    return_count: int = 0
+    return_frequency: float = 0.0
+    attractor_strength: float = 0.0
+
+
+@dataclass
+class AttractorStats:
+    visit_count: int = 0
+    dwell_time: float = 0.0
+    return_count: int = 0
+    return_frequency: float = 0.0
+    last_step_idx: int | None = None
+    last_timestamp: float | None = None
 
 
 @dataclass
@@ -49,17 +65,21 @@ class LatentAtlas:
     projection_2d: np.ndarray | None = None
     nn: NearestNeighbors | None = None
     cluster_labels: np.ndarray | None = None
+    recurrence_distance_threshold: float = 0.75
+    _attractor_stats: dict[str, AttractorStats] = field(default_factory=dict, init=False, repr=False, compare=False)
     _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
     def append_points(self, new_points: list[StatePoint]) -> None:
         with self._lock:
             self.points.extend(new_points)
+            self._rebuild_attractor_stats()
             self._rebuild_indexes_if_needed()
 
     def clear(self) -> None:
         with self._lock:
             self.points = []
             self.edges = []
+            self._attractor_stats = {}
             self._rebuild_indexes()
 
     def remove_runs(self, run_ids: set[str]) -> None:
@@ -68,6 +88,7 @@ class LatentAtlas:
         with self._lock:
             self.points = [p for p in self.points if p.run_id not in run_ids]
             self.edges = [e for e in self.edges if e.run_id not in run_ids]
+            self._rebuild_attractor_stats()
             self._rebuild_indexes()
 
     def append_transition(self, edge: TransitionEdge) -> None:
@@ -75,22 +96,107 @@ class LatentAtlas:
             self.edges.append(edge)
 
     def append_latent_state(self, state: LatentState, *, run_label: str, step_idx: int) -> StatePoint:
-        point = StatePoint(
-            state_id=state.state_id,
-            run_id=state.run_id,
-            run_label=run_label,
-            basin=state.basin,
-            step_idx=step_idx,
-            preview=state.preview_text,
-            committed=state.committed_prefix,
-            coherence=state.coherence,
-            entropy=state.entropy,
-            embedding=np.asarray(state.latent_vector, dtype=np.float32),
-            phase=state.phase.value,
-            density=state.density,
-        )
-        self.append_points([point])
-        return point
+        with self._lock:
+            embedding = np.asarray(state.latent_vector, dtype=np.float32)
+            matched_idx = self._nearest_prior_index(embedding, state.basin)
+            attractor_id = state.state_id
+            recurrence = 0
+            if matched_idx is not None:
+                matched = self.points[matched_idx]
+                matched.recurrence += 1
+                recurrence = matched.recurrence
+                attractor_id = matched.attractor_id or matched.state_id
+            point = StatePoint(
+                state_id=state.state_id,
+                run_id=state.run_id,
+                run_label=run_label,
+                basin=state.basin,
+                step_idx=step_idx,
+                preview=state.preview_text,
+                committed=state.committed_prefix,
+                coherence=state.coherence,
+                entropy=state.entropy,
+                embedding=embedding,
+                phase=state.phase.value,
+                density=state.density,
+                recurrence=recurrence,
+                attractor_id=attractor_id,
+            )
+            self._update_attractor_metrics(point, timestamp=state.timestamp)
+            self.points.append(point)
+            self._rebuild_indexes_if_needed()
+            return point
+
+    def _nearest_prior_index(self, embedding: np.ndarray, basin: str) -> int | None:
+        if not self.points:
+            return None
+        candidate_indices = [i for i, p in enumerate(self.points) if p.basin == basin]
+        if not candidate_indices:
+            return None
+        mat = np.stack([self.points[i].embedding for i in candidate_indices], axis=0)
+        if mat.shape[1] != embedding.shape[0]:
+            return None
+        dists = np.linalg.norm(mat - embedding.reshape(1, -1), axis=1)
+        nearest_local_idx = int(np.argmin(dists))
+        if float(dists[nearest_local_idx]) > self.recurrence_distance_threshold:
+            return None
+        return candidate_indices[nearest_local_idx]
+
+    def _strength_score(self, stats: AttractorStats) -> float:
+        return float(stats.visit_count + (0.25 * stats.dwell_time) + (2.0 * stats.return_frequency))
+
+    def _update_attractor_metrics(self, point: StatePoint, *, timestamp: float) -> None:
+        attractor_id = point.attractor_id or point.state_id
+        stats = self._attractor_stats.setdefault(attractor_id, AttractorStats())
+        stats.visit_count += 1
+        if stats.last_step_idx is not None:
+            gap = point.step_idx - stats.last_step_idx
+            if gap == 1 and stats.last_timestamp is not None:
+                stats.dwell_time += max(0.0, float(timestamp - stats.last_timestamp))
+            elif gap > 1:
+                stats.return_count += 1
+        denom = max(stats.visit_count - 1, 1)
+        return_frequency = stats.return_count / denom
+        stats.last_step_idx = point.step_idx
+        stats.last_timestamp = timestamp
+        stats.return_frequency = return_frequency
+
+        point.visit_count = stats.visit_count
+        point.dwell_time = stats.dwell_time
+        point.return_count = stats.return_count
+        point.return_frequency = return_frequency
+        point.attractor_strength = self._strength_score(stats)
+        point.attractor_id = attractor_id
+
+        for existing in self.points:
+            if (existing.attractor_id or existing.state_id) == attractor_id:
+                existing.visit_count = stats.visit_count
+                existing.dwell_time = stats.dwell_time
+                existing.return_count = stats.return_count
+                existing.return_frequency = return_frequency
+                existing.attractor_strength = point.attractor_strength
+
+    def _rebuild_attractor_stats(self) -> None:
+        self._attractor_stats = {}
+        if not self.points:
+            return
+        points = sorted(self.points, key=lambda p: (p.step_idx, p.state_id))
+        for point in points:
+            stats = self._attractor_stats.setdefault(point.attractor_id or point.state_id, AttractorStats())
+            stats.visit_count += 1
+            if stats.last_step_idx is not None:
+                gap = point.step_idx - stats.last_step_idx
+                if gap > 1:
+                    stats.return_count += 1
+            stats.last_step_idx = point.step_idx
+            stats.last_timestamp = None
+            denom = max(stats.visit_count - 1, 1)
+            return_frequency = stats.return_count / denom
+            stats.return_frequency = return_frequency
+            point.visit_count = stats.visit_count
+            point.return_count = stats.return_count
+            point.return_frequency = return_frequency
+            point.attractor_strength = self._strength_score(stats)
 
     def _rebuild_indexes_if_needed(self) -> None:
         # Keep projection and neighbor index in sync on every append so the UI
@@ -156,8 +262,18 @@ class LatentAtlas:
 
     def candidate_attractors(self, basin: str | None = None, top_k: int = 5) -> list[StatePoint]:
         candidates = [p for p in self.points if basin is None or p.basin == basin]
-        candidates.sort(key=lambda p: (p.recurrence, p.coherence, -p.entropy), reverse=True)
-        return candidates[:top_k]
+        best_by_attractor: dict[str, StatePoint] = {}
+        for point in candidates:
+            key = point.attractor_id or point.state_id
+            current = best_by_attractor.get(key)
+            if current is None or point.attractor_strength > current.attractor_strength:
+                best_by_attractor[key] = point
+        ranked = list(best_by_attractor.values())
+        ranked.sort(
+            key=lambda p: (p.attractor_strength, p.visit_count, p.return_frequency, p.recurrence, p.coherence, -p.entropy),
+            reverse=True,
+        )
+        return ranked[:top_k]
 
     def to_frame(self) -> pd.DataFrame:
         with self._lock:
@@ -181,6 +297,13 @@ class LatentAtlas:
                         "coherence": p.coherence,
                         "entropy": p.entropy,
                         "density": p.density,
+                        "recurrence": p.recurrence,
+                        "attractor_id": p.attractor_id or p.state_id,
+                        "visit_count": p.visit_count,
+                        "dwell_time": p.dwell_time,
+                        "return_count": p.return_count,
+                        "return_frequency": p.return_frequency,
+                        "attractor_strength": p.attractor_strength,
                         "x": float(x),
                         "y": float(y),
                         "cluster": cluster,
@@ -235,6 +358,13 @@ class AtlasStorage:
                     coherence=float(row["coherence"]),
                     entropy=float(row["entropy"]),
                     density=float(row.get("density", 0.0)),
+                    recurrence=int(row.get("recurrence", 0)),
+                    attractor_id=row.get("attractor_id", row["state_id"]),
+                    visit_count=int(row.get("visit_count", 1)),
+                    dwell_time=float(row.get("dwell_time", 0.0)),
+                    return_count=int(row.get("return_count", 0)),
+                    return_frequency=float(row.get("return_frequency", 0.0)),
+                    attractor_strength=float(row.get("attractor_strength", 0.0)),
                     embedding=np.array(embeddings[i], dtype=np.float32),
                 )
             )
@@ -242,5 +372,6 @@ class AtlasStorage:
         if self.edges_path.exists():
             e_df = pd.read_parquet(self.edges_path)
             atlas.edges = [TransitionEdge(**r) for r in e_df.to_dict(orient="records")]
+        atlas._rebuild_attractor_stats()
         atlas._rebuild_indexes()
         return atlas
