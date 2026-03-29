@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import plotly.express as px
-from dash import Dash, Input, Output, State, dcc, html
+from dash import Dash, Input, Output, State, callback_context, dcc, html
 
 from gguf_dream_lab.backend.atlas.atlas import AtlasStorage, LatentAtlas
 from gguf_dream_lab.backend.dream.controller import DreamController
@@ -80,7 +80,7 @@ def create_dash_app(config: AppConfig) -> Dash:
         prevent_initial_call=True,
     )
     def controls(start, pause, resume, stop, prompt, basin, threshold):
-        ctx = app.callback_context
+        ctx = callback_context
         trigger = ctx.triggered[0]["prop_id"].split(".")[0]
         if trigger == "start-btn":
             config.dream.prompt = prompt or ""
