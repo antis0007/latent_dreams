@@ -86,10 +86,8 @@ def create_dash_app(config: AppConfig) -> Dash:
             session_store.save_ticks(controller.state.run_id, controller.tick_history, metadata={"dream": config.dream.model_dump()})
         return {"at": time(), "status": controller.state.status}
 
-
-
-    @app.callback(Output("status", "children"), Input("ticker", "n_intervals"), Input("control-ack", "data"))
-    def refresh_status(_, __):
+    @app.callback(Output("status", "children"), Input("ticker", "n_intervals"))
+    def refresh_status(_):
         detail = f" ({controller.state.status_detail})" if controller.state.status_detail else ""
         return f"Status: {controller.state.status}{detail}"
 
@@ -105,9 +103,8 @@ def create_dash_app(config: AppConfig) -> Dash:
         Output("latent-graph", "figure"),
         Output("selected-state", "children"),
         Input("ticker", "n_intervals"),
-        Input("control-ack", "data"),
     )
-    def refresh_stream(_, __):
+    def refresh_stream(_):
         frame = controller.atlas.to_frame()
         if frame.empty:
             fig = px.scatter(x=[0], y=[0], title="No latent states yet")
