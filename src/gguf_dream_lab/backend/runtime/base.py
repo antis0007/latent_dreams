@@ -14,6 +14,7 @@ class RuntimeCapabilities:
     supports_logits_all: bool
     supports_streaming: bool
     supports_instrumented_latents: bool
+    supports_true_latent_readout: bool
     backend_name: str
     warnings: list[str]
     capture_sites: list[str] = field(default_factory=list)
@@ -44,6 +45,8 @@ class RuntimeBackend(Protocol):
 
     def evolve_latent_state(self, state: LatentState, target_vector: np.ndarray, noise_scale: float) -> LatentState: ...
 
-    def decode_preview_from_latent(self, state: LatentState, max_tokens: int = 16) -> str: ...
+    def decode_prompt_conditioned_preview_from_latent(self, state: LatentState, max_tokens: int = 16) -> str: ...
+
+    def decode_true_latent_readout_preview(self, state: LatentState, max_tokens: int = 16) -> str: ...
 
     def decode_commit_from_latent(self, state: LatentState, max_tokens: int = 24) -> str: ...
