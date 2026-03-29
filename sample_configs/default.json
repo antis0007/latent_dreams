@@ -1,0 +1,41 @@
+{
+  "runtime": {
+    "model_path": "C:/models/your-model.Q4_K_M.gguf",
+    "n_ctx": 4096,
+    "n_gpu_layers": 40,
+    "n_batch": 512,
+    "n_ubatch": 512,
+    "logits_all": true,
+    "embedding": true,
+    "offload_kqv": true,
+    "flash_attn": false,
+    "temperature": 0.9,
+    "top_k": 40,
+    "top_p": 0.95,
+    "repeat_penalty": 1.05,
+    "seed": 42
+  },
+  "dream": {
+    "prompt": "",
+    "basin": "narrative",
+    "tick_hz": 1.5,
+    "noise_amplitude": 0.15,
+    "coherence_threshold": 0.62,
+    "anneal_rate": 0.98,
+    "randomness": 0.9,
+    "max_preview_len": 220,
+    "max_committed_len": 2000,
+    "branch_count": 1,
+    "run_label": "local-mvp",
+    "weights": {
+      "entropy": 0.2,
+      "density": 0.2,
+      "token_stability": 0.2,
+      "smoothness": 0.2,
+      "branch_agreement": 0.1,
+      "known_state_similarity": 0.1
+    }
+  },
+  "storage_dir": "storage",
+  "log_level": "INFO"
+}
