@@ -188,8 +188,10 @@ class DreamController:
 
     def _seed_latent_state(self, cfg: DreamConfig, prompt: str) -> LatentState:
         basin_vec = self.atlas.sample_seed_from_basin(cfg.basin.value)
-        latent = self.runtime.capture_latent_state(self.state.run_id, cfg.basin.value, prompt)
+        latent = self._normalize_latent_state(self.runtime.capture_latent_state(self.state.run_id, cfg.basin.value, prompt))
         if basin_vec is not None:
+            basin_vec = np.asarray(basin_vec, dtype=np.float32).reshape(-1)
+            basin_vec = self._align_vector_shape(basin_vec, latent.latent_vector)
             blended = 0.65 * basin_vec + 0.35 * latent.latent_vector
             latent = latent.clone_with_vector(blended, phase=DreamPhase.HYPNAGOGIC)
         latent.metadata["prompt_seed"] = prompt
@@ -201,6 +203,7 @@ class DreamController:
         for _ in range(max(cfg.branch_count, 1)):
             target = 0.7 * neighbors + 0.3 * latent.latent_vector
             proposal = self.runtime.evolve_latent_state(latent, target_vector=target, noise_scale=cfg.noise_amplitude * anneal)
+            proposal = self._normalize_latent_state(proposal)
             proposal.phase = phase
             proposal.metadata["branch_agreement"] = 1.0 if cfg.branch_count == 1 else 1.0 - (cfg.noise_amplitude * anneal * 0.25)
             candidates.append(proposal)
@@ -234,8 +237,29 @@ class DreamController:
 
     @staticmethod
     def _smoothness(prev: np.ndarray, cur: np.ndarray) -> float:
+        prev = np.asarray(prev, dtype=np.float32).reshape(-1)
+        cur = np.asarray(cur, dtype=np.float32).reshape(-1)
+        prev = DreamController._align_vector_shape(prev, cur)
         cos = float(np.dot(cur, prev) / (np.linalg.norm(cur) * np.linalg.norm(prev) + 1e-9))
         return float((cos + 1.0) / 2.0)
+
+    @staticmethod
+    def _align_vector_shape(vec: np.ndarray, ref: np.ndarray) -> np.ndarray:
+        vec = np.asarray(vec, dtype=np.float32).reshape(-1)
+        ref = np.asarray(ref, dtype=np.float32).reshape(-1)
+        if vec.shape == ref.shape:
+            return vec
+        aligned = np.zeros_like(ref)
+        upto = min(vec.shape[0], ref.shape[0])
+        aligned[:upto] = vec[:upto]
+        return aligned
+
+    @staticmethod
+    def _normalize_latent_state(state: LatentState) -> LatentState:
+        vec = np.asarray(state.latent_vector, dtype=np.float32)
+        if vec.ndim == 1:
+            return state
+        return state.clone_with_vector(vec.reshape(-1))
 
     @staticmethod
     def _phase_for_step(step_idx: int) -> DreamPhase:
