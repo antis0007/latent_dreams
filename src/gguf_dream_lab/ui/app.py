@@ -4,7 +4,7 @@ from pathlib import Path
 from time import time
 
 import plotly.express as px
-from dash import Dash, Input, Output, State, callback_context, dcc, html
+from dash import Dash, Input, Output, State, ctx, dcc, html
 
 from gguf_dream_lab.backend.atlas.atlas import AtlasStorage, LatentAtlas
 from gguf_dream_lab.backend.dream.controller import DreamController
@@ -122,8 +122,9 @@ def create_dash_app(config: AppConfig) -> Dash:
         prevent_initial_call=True,
     )
     def controls(start, pause, resume, stop, prompt, basin, threshold):
-        ctx = callback_context
-        trigger = ctx.triggered[0]["prop_id"].split(".")[0]
+        trigger = ctx.triggered_id
+        if trigger is None:
+            return {"at": time(), "status": controller.state.status}
         if trigger == "start-btn":
             config.dream.prompt = prompt or ""
             config.dream.basin = Basin(basin)
@@ -141,9 +142,8 @@ def create_dash_app(config: AppConfig) -> Dash:
     @app.callback(
         Output("status", "children"),
         Input("ticker", "n_intervals"),
-        Input("control-ack", "data"),
     )
-    def refresh_status(_, __):
+    def refresh_status(_):
         detail = f" — {controller.state.status_detail}" if controller.state.status_detail else ""
         status_text = f"Status: {controller.state.status}{detail}"
         return status_text
@@ -155,9 +155,8 @@ def create_dash_app(config: AppConfig) -> Dash:
         Output("latent-graph", "figure"),
         Output("selected-state", "children"),
         Input("ticker", "n_intervals"),
-        Input("control-ack", "data"),
     )
-    def refresh_stream(_, __):
+    def refresh_stream(_):
         tick = controller.state.latest_tick
         if tick is None:
             fig = px.scatter(x=[0], y=[0], title="No latent states yet")
