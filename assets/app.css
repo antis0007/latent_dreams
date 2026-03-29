@@ -186,6 +186,29 @@ input[type="text"]::placeholder,
   height: 540px;
 }
 
+.run-controls-row {
+  display: flex;
+  gap: 0.8rem;
+  align-items: end;
+  margin-top: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.run-filter-wrap {
+  flex: 1 1 360px;
+}
+
+.run-actions {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.follow-latest-toggle {
+  margin-top: 0.75rem;
+  color: var(--text-muted);
+}
+
 .rc-slider-track {
   background-color: var(--accent);
 }
