@@ -53,3 +53,29 @@ def test_to_frame_tolerates_partial_cluster_labels():
 
     assert len(frame) == 3
     assert frame.loc[2, "cluster"] == -1
+
+
+def test_neighbors_handles_stale_nn_index_without_raising():
+    atlas = LatentAtlas()
+    for i in range(4):
+        atlas.append_points(
+            [
+                StatePoint(
+                    state_id=f"s{i}",
+                    run_id="r",
+                    run_label="x",
+                    basin="narrative",
+                    step_idx=i,
+                    preview="p",
+                    committed="c",
+                    coherence=0.5,
+                    entropy=0.5,
+                    embedding=np.random.randn(16).astype("float32"),
+                )
+            ]
+        )
+
+    neighbors = atlas.neighbors(3, k=4)
+
+    assert isinstance(neighbors, list)
+    assert len(neighbors) <= 3

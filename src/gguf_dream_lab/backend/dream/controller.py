@@ -220,9 +220,10 @@ class DreamController:
             return current
         idx = len(self.atlas.points) - 1
         nn_idx = self.atlas.neighbors(idx, k=4)
+        nn_idx = [i for i in nn_idx if i != idx]
         if not nn_idx:
             return current
-        vecs = [self.atlas.points[i].embedding for i in nn_idx]
+        vecs = [self._align_vector_shape(self.atlas.points[i].embedding, current) for i in nn_idx]
         return np.mean(np.stack(vecs, axis=0), axis=0)
 
     def _estimate_local_density(self, vec: np.ndarray) -> float:

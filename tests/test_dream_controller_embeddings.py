@@ -95,3 +95,28 @@ def test_smoothness_flattens_row_vectors():
     smoothness = DreamController._smoothness(prev, cur)
 
     assert 0.99 <= smoothness <= 1.0
+
+
+def test_neighbor_vector_ignores_self_neighbor():
+    controller = _controller()
+    current = np.ones(8, dtype=np.float32)
+    controller.atlas.append_points(
+        [
+            StatePoint(
+                state_id="s0",
+                run_id="r0",
+                run_label="run",
+                basin="narrative",
+                step_idx=0,
+                preview="",
+                committed="",
+                coherence=0.0,
+                entropy=0.0,
+                embedding=current.copy(),
+            )
+        ]
+    )
+
+    neighbor = controller._neighbor_vector(current)
+
+    assert np.allclose(neighbor, current)

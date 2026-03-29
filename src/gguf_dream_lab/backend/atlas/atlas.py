@@ -105,15 +105,29 @@ class LatentAtlas:
             if self.nn is None or not self.points:
                 return []
             mat = np.stack([p.embedding for p in self.points], axis=0)
-            _, indices = self.nn.kneighbors(mat[index].reshape(1, -1), n_neighbors=min(k, len(self.points)))
-            return indices[0].tolist()
+            fitted_count = int(getattr(self.nn, "n_samples_fit_", 0) or 0)
+            if fitted_count <= 0:
+                return []
+            query = mat[index].reshape(1, -1)
+            neighbor_count = min(k, len(self.points), fitted_count)
+            if neighbor_count <= 0:
+                return []
+            _, indices = self.nn.kneighbors(query, n_neighbors=neighbor_count)
+            return [int(i) for i in indices[0].tolist() if i < len(self.points)]
 
     def local_density(self, index: int, k: int = 6) -> float:
         with self._lock:
             if self.nn is None or len(self.points) < 2:
                 return 0.0
             mat = np.stack([p.embedding for p in self.points], axis=0)
-            distances, _ = self.nn.kneighbors(mat[index].reshape(1, -1), n_neighbors=min(k, len(self.points)))
+            fitted_count = int(getattr(self.nn, "n_samples_fit_", 0) or 0)
+            if fitted_count <= 0:
+                return 0.0
+            query = mat[index].reshape(1, -1)
+            neighbor_count = min(k, len(self.points), fitted_count)
+            if neighbor_count <= 0:
+                return 0.0
+            distances, _ = self.nn.kneighbors(query, n_neighbors=neighbor_count)
             avg_dist = float(np.mean(distances[0][1:])) if distances.shape[1] > 1 else float(np.mean(distances[0]))
             return 1.0 / (avg_dist + 1e-6)
 
