@@ -103,21 +103,19 @@ def create_dash_app(config: AppConfig) -> Dash:
         Output("committed", "children"),
         Output("metrics", "children"),
         Output("latent-graph", "figure"),
-        Output("scrub-step", "max"),
         Output("selected-state", "children"),
         Input("ticker", "n_intervals"),
-        Input("scrub-step", "value"),
+        Input("control-ack", "data"),
     )
-    def refresh_stream(_, scrub_idx):
+    def refresh_stream(_, __):
         frame = controller.atlas.to_frame()
         if frame.empty:
             fig = px.scatter(x=[0], y=[0], title="No latent states yet")
             fig.update_layout(template="plotly_dark")
-            return "", "", "No ticks yet.", fig, 1, ""
+            return "", "", "No ticks yet.", fig, ""
 
         max_step = int(frame["step_idx"].max())
-        selected_step = min(int(scrub_idx or max_step), max_step)
-        selected = frame[frame["step_idx"] == selected_step].tail(1)
+        selected = frame[frame["step_idx"] == max_step].tail(1)
         tick = controller.state.latest_tick
 
         fig = px.scatter(frame, x="x", y="y", color="coherence", symbol="phase", hover_data=["state_id", "basin", "step_idx", "preview", "committed", "density", "entropy"])
@@ -133,9 +131,17 @@ def create_dash_app(config: AppConfig) -> Dash:
             selected_txt = f"selected state={row['state_id']} phase={row['phase']} basin={row['basin']}"
 
         if tick is None:
-            return "", "", "No ticks yet.", fig, max_step, selected_txt
+            return "", "", "No ticks yet.", fig, selected_txt
         metrics = f"mode={tick.mode}\nphase={tick.phase}\ncoherence={tick.coherence:.3f}\nentropy={tick.entropy:.3f}\ndensity={tick.local_density:.3f}\nstability={tick.token_stability:.3f}"
-        return tick.preview_text, tick.committed_text, metrics, fig, max_step, selected_txt
+        return tick.preview_text, tick.committed_text, metrics, fig, selected_txt
+
+
+    @app.callback(Output("scrub-step", "max"), Input("ticker", "n_intervals"))
+    def refresh_scrub_max(_):
+        frame = controller.atlas.to_frame()
+        if frame.empty:
+            return 1
+        return int(frame["step_idx"].max())
 
     return app
 
