@@ -38,6 +38,7 @@ class DreamTick:
     state_id: str
     phase: str
     mode: str
+    commit_source: str
     status: str
 
 
@@ -175,6 +176,7 @@ class DreamController:
                 state_id=latent.state_id,
                 phase=phase.value,
                 mode=latent.mode.value,
+                commit_source=str(latent.metadata.get("commit_source", "none")),
                 status=self.state.status,
             )
             self.state.latest_tick = tick

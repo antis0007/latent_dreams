@@ -4,10 +4,12 @@ import types
 
 import numpy as np
 
+from gguf_dream_lab.backend.dream.state import DreamMode, LatentState
 from gguf_dream_lab.backend.instrumentation.adapters import (
     InstrumentationVerification,
     LatentCapture,
 )
+from gguf_dream_lab.backend.runtime.base import RuntimeCapabilities
 from gguf_dream_lab.backend.runtime.llama_backend import LlamaCppBackend
 from gguf_dream_lab.config.models import RuntimeConfig
 
@@ -83,3 +85,55 @@ def test_stubbed_instrumentation_does_not_promote_true_mode():
     assert caps.active_mode.value == "enhanced_latent"
     assert "layer_16" in caps.capture_sites
     assert any("source=instrumented_stub" in warning for warning in caps.warnings)
+
+
+def test_decode_commit_from_latent_sets_approx_preview_source_and_avoids_preview_truncation():
+    class BackendWithoutPreviewPath(LlamaCppBackend):
+        def decode_prompt_conditioned_preview_from_latent(self, state: LatentState, max_tokens: int = 16) -> str:
+            raise AssertionError("commit synthesis should not call preview decode path")
+
+    backend = BackendWithoutPreviewPath(RuntimeConfig(model_path=None))
+    state = LatentState(
+        run_id="r1",
+        basin="narrative",
+        mode=DreamMode.ENHANCED_LATENT,
+        latent_vector=np.ones(256, dtype=np.float32),
+    )
+
+    committed = backend.decode_commit_from_latent(state, max_tokens=16)
+
+    assert committed
+    assert state.metadata["commit_source"] == "approx_preview"
+
+
+def test_decode_commit_from_latent_uses_true_decode_source_when_capability_is_available():
+    class TrueDecodeBackend(LlamaCppBackend):
+        def capabilities(self) -> RuntimeCapabilities:
+            return RuntimeCapabilities(
+                supports_embeddings=True,
+                supports_logits_all=True,
+                supports_streaming=True,
+                supports_instrumented_latents=True,
+                supports_true_latent_readout=True,
+                backend_name="test",
+                warnings=[],
+                capture_sites=[],
+                active_mode=DreamMode.TRUE_LATENT_INSTRUMENTED,
+            )
+
+        def decode_true_latent_readout_preview(self, state: LatentState, max_tokens: int = 16) -> str:
+            del state, max_tokens
+            return "true decode commit"
+
+    backend = TrueDecodeBackend(RuntimeConfig(model_path=None, instrumented_backend=True))
+    state = LatentState(
+        run_id="r2",
+        basin="narrative",
+        mode=DreamMode.TRUE_LATENT_INSTRUMENTED,
+        latent_vector=np.ones(256, dtype=np.float32),
+    )
+
+    committed = backend.decode_commit_from_latent(state, max_tokens=16)
+
+    assert committed == "true decode commit"
+    assert state.metadata["commit_source"] == "true_latent_decode"

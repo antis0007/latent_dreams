@@ -242,9 +242,57 @@ class LlamaCppBackend(RuntimeBackend):
         return self.decode_prompt_conditioned_preview_from_latent(state, max_tokens=max_tokens)
 
     def decode_commit_from_latent(self, state: LatentState, max_tokens: int = 24) -> str:
-        preview = self.decode_prompt_conditioned_preview_from_latent(state, max_tokens=max_tokens)
-        words = preview.split()
-        return " ".join(words[: max(8, min(len(words), max_tokens))])
+        caps = self.capabilities()
+        if caps.supports_instrumented_latents and caps.supports_true_latent_readout:
+            state.metadata["commit_source"] = "true_latent_decode"
+            return self.decode_true_latent_readout_preview(state, max_tokens=max_tokens)
+
+        state.metadata["commit_source"] = "approx_preview"
+        self.load()
+        if self._llm is not None:
+            seed = state.metadata.get("prompt_seed", "")
+            context = state.committed_prefix.strip()
+            phase = str(state.phase.value).replace("_", " ").lower()
+            prompt = (
+                "Synthesize one concise committed memory fragment for a dream journal.\n"
+                f"Prompt seed: {seed or '[none]'}\n"
+                f"Dream phase: {phase}\n"
+                f"Already committed context: {context or '[none]'}\n"
+                "Return only the fragment text:"
+            )
+            try:
+                out = self._llm(
+                    prompt,
+                    max_tokens=max(8, int(max_tokens)),
+                    temperature=min(1.15, max(0.15, self.config.temperature)),
+                    top_k=max(20, int(self.config.top_k)),
+                    top_p=min(0.98, max(0.55, self.config.top_p)),
+                    repeat_penalty=max(1.0, self.config.repeat_penalty),
+                    echo=False,
+                    stream=False,
+                )
+                text = out["choices"][0]["text"].strip()
+                if text:
+                    return text
+            except Exception:
+                pass
+
+        # Fallback synthesis path for synthetic mode: deterministic but independent
+        # from preview-token truncation.
+        hash_seed = abs(hash(state.latent_vector.tobytes()[64:128])) % (2**32)
+        rng = np.random.default_rng(hash_seed)
+        lex = [
+            "a lantern hums under rain",
+            "footsteps fold into velvet static",
+            "glass corridors breathe moonlit dust",
+            "a paper clock forgets the hour",
+            "the shoreline mirrors a distant voice",
+            "hushed signals drift through midnight rooms",
+            "memory bends around an open threshold",
+            "the city exhales in silver echoes",
+        ]
+        span = max(1, min(3, max_tokens // 8))
+        return ". ".join(rng.choice(lex, size=span, replace=False).tolist())
 
     def benchmark(self, prompt: str, steps: int = 16) -> dict[str, Any]:
         self.load()

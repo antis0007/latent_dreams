@@ -347,6 +347,7 @@ def create_dash_app(config: AppConfig) -> Dash:
             metrics = (
                 f"mode={tick.mode if tick else 'unknown'}\n"
                 f"phase={row['phase']}\n"
+                f"commit_source={tick.commit_source if tick else 'unknown'}\n"
                 f"coherence={float(row['coherence']):.3f}\n"
                 f"entropy={float(row['entropy']):.3f}\n"
                 f"density={float(row['density']):.3f}"
@@ -356,6 +357,7 @@ def create_dash_app(config: AppConfig) -> Dash:
             metrics = (
                 f"mode={tick.mode}\n"
                 f"phase={tick.phase}\n"
+                f"commit_source={tick.commit_source}\n"
                 f"coherence={tick.coherence:.3f}\n"
                 f"entropy={tick.entropy:.3f}\n"
                 f"density={tick.local_density:.3f}\n"
