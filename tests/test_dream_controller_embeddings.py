@@ -2,6 +2,7 @@ import numpy as np
 
 from gguf_dream_lab.backend.atlas.atlas import LatentAtlas, StatePoint
 from gguf_dream_lab.backend.dream.controller import DreamController
+from gguf_dream_lab.config.models import DreamConfig
 
 
 class _DummyRuntime:
@@ -55,3 +56,26 @@ def test_estimate_local_density_returns_zero_for_shape_mismatch():
     density = controller._estimate_local_density(np.ones(8, dtype=np.float32))
 
     assert density == 0.0
+
+
+def test_merge_preview_token_replaces_repeated_tail_instead_of_appending():
+    updated = DreamController._merge_preview_token("I I", "everything", max_len=100)
+    assert updated == "I everything"
+
+
+def test_merge_committed_token_skips_duplicate_tail_token():
+    updated = DreamController._merge_committed_token("the dream", "dream", max_len=100)
+    assert updated == "the dream"
+
+
+def test_evolve_prompt_includes_recent_context():
+    controller = _controller()
+    controller.state.preview_text = "I the everything words"
+    controller.state.committed_text = "a coherent thought appears"
+    cfg = DreamConfig(prompt="seed")
+
+    prompt = controller._evolve_prompt(base_prompt="seed", cfg=cfg)
+
+    assert "seed" in prompt
+    assert "coherent thought appears" in prompt
+    assert "everything words" in prompt
