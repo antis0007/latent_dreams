@@ -233,7 +233,7 @@ class LlamaCppBackend(RuntimeBackend):
             state.metadata["reinject_ok"] = injected
         return state.clone_with_vector(proposal)
 
-    def decode_prompt_conditioned_preview_from_latent(self, state: LatentState, max_tokens: int = 16) -> str:
+    def decode_approximate_prompt_synthesis_preview(self, state: LatentState, max_tokens: int = 16) -> str:
         self.load()
         if self._llm is not None:
             seed = state.metadata.get("prompt_seed", "")
@@ -292,7 +292,7 @@ class LlamaCppBackend(RuntimeBackend):
     def decode_true_latent_readout_preview(self, state: LatentState, max_tokens: int = 16) -> str:
         # Reserved for instrumented latent-to-token readout once backend hooks expose
         # a true decode path. Until then we deliberately route to prompt-conditioned synthesis.
-        return self.decode_prompt_conditioned_preview_from_latent(state, max_tokens=max_tokens)
+        return self.decode_approximate_prompt_synthesis_preview(state, max_tokens=max_tokens)
 
     def decode_commit_from_latent(self, state: LatentState, max_tokens: int = 24) -> str:
         caps = self.capabilities()
@@ -300,7 +300,7 @@ class LlamaCppBackend(RuntimeBackend):
             state.metadata["commit_source"] = "true_latent_decode"
             return self.decode_true_latent_readout_preview(state, max_tokens=max_tokens)
 
-        state.metadata["commit_source"] = "approx_preview"
+        state.metadata["commit_source"] = "approximate_prompt_synthesis"
         self.load()
         if self._llm is not None:
             seed = state.metadata.get("prompt_seed", "")
