@@ -37,6 +37,7 @@ class DreamTick:
     token_stability: float
     smoothness: float
     state_id: str
+    parent_state_id: str
     phase: str
     mode: str
     commit_source: str
@@ -44,6 +45,8 @@ class DreamTick:
     branch_id: str
     branch_seed: int
     branch_score: float
+    candidate_scores: str
+    decode_provenance: str
     status: str
 
 
@@ -125,7 +128,9 @@ class DreamController:
             phase = self._phase_for_step(self.state.step_idx)
             candidates = self._branch_candidates(latent, cfg, anneal, phase, step_idx=self.state.step_idx)
             latent = self._choose_candidate(candidates, prev_latent=latent)
+            candidate_scores = str(latent.metadata.get("candidate_scores", "[]"))
             preview = self._decode_preview(latent, max_tokens=max(12, cfg.preview_decode_cadence * 16))
+            preview_decode_source = self._preview_decode_source()
             self.state.preview_text = preview[-cfg.max_preview_len :]
             preview_history.append(self.state.preview_text)
             token_stability = self._token_stability(preview_history)
@@ -151,6 +156,9 @@ class DreamController:
                 committed_chunk = self.runtime.decode_commit_from_latent(latent, max_tokens=24)
                 self.state.committed_text = self._merge_committed_chunk(self.state.committed_text, committed_chunk, cfg.max_committed_len)
                 latent.committed_prefix = self.state.committed_text
+                commit_decode_source = "decode_commit_from_latent"
+            else:
+                commit_decode_source = "none"
 
             point = self.atlas.append_latent_state(latent, run_label=cfg.run_label, step_idx=self.state.step_idx)
             if len(self.atlas.points) > 1:
@@ -182,6 +190,7 @@ class DreamController:
                 token_stability=token_stability,
                 smoothness=smoothness,
                 state_id=latent.state_id,
+                parent_state_id=str(latent.metadata.get("selected_from_state_id", "")),
                 phase=phase.value,
                 mode=latent.mode.value,
                 commit_source=str(latent.metadata.get("commit_source", "none")),
@@ -189,6 +198,11 @@ class DreamController:
                 branch_id=str(latent.metadata.get("branch_id", "")),
                 branch_seed=int(latent.metadata.get("branch_seed", 0)),
                 branch_score=float(latent.metadata.get("branch_score", 0.0)),
+                candidate_scores=candidate_scores,
+                decode_provenance=(
+                    f"preview={preview_decode_source};commit={commit_decode_source};"
+                    f"preview_cadence={cfg.preview_decode_cadence}"
+                ),
                 status=self.state.status,
             )
             self.state.latest_tick = tick
@@ -271,6 +285,9 @@ class DreamController:
 
     def _choose_candidate(self, candidates: list[LatentState], *, prev_latent: LatentState) -> LatentState:
         if len(candidates) == 1:
+            candidates[0].metadata["candidate_scores"] = str(
+                [{"branch_id": candidates[0].metadata.get("branch_id", ""), "score": float(candidates[0].metadata.get("branch_score", 0.0))}]
+            )
             return candidates[0]
         scored = sorted(
             enumerate(candidates),
@@ -279,9 +296,20 @@ class DreamController:
         )
         for rank, (_, candidate) in enumerate(scored, start=1):
             candidate.metadata["branch_rank"] = rank
+        candidate_scores = [
+            {"branch_id": str(candidate.metadata.get("branch_id", "")), "score": float(candidate.metadata.get("branch_score", 0.0))}
+            for _, candidate in scored
+        ]
         selected = scored[0][1]
         selected.metadata["selected_from_state_id"] = prev_latent.state_id
+        selected.metadata["candidate_scores"] = str(candidate_scores)
         return selected
+
+    def _preview_decode_source(self) -> str:
+        caps = self.runtime.capabilities()
+        if caps.supports_instrumented_latents and caps.supports_true_latent_readout:
+            return "decode_true_latent_readout_preview"
+        return "decode_prompt_conditioned_preview_from_latent"
 
     def _distance_to_attractor(self, vec: np.ndarray, *, basin: str) -> float:
         attractors = self.atlas.candidate_attractors(basin=basin, top_k=5)
