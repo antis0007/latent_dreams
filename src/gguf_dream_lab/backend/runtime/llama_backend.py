@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from gguf_dream_lab.backend.dream.state import DreamMode, LatentState
+from gguf_dream_lab.backend.dream.state import DreamMode, LatentSource, LatentState
 from gguf_dream_lab.backend.instrumentation.adapters import (
     ExperimentalLlamaForkAdapter,
     InstrumentationAdapter,
@@ -164,10 +164,25 @@ class LlamaCppBackend(RuntimeBackend):
             cap = self.instrumentation.capture()
             if cap is not None:
                 return self._state_from_capture(run_id, basin, mode, cap)
+            return LatentState(
+                run_id=run_id,
+                basin=basin,
+                mode=mode,
+                latent_vector=np.zeros(256, dtype=np.float32),
+                latent_source=LatentSource.STUB_CAPTURE,
+                capture_site="instrumentation_stub",
+            )
         vec = self.embed_text(prompt)
         if vec is None:
             vec = np.zeros(256, dtype=np.float32)
-        return LatentState(run_id=run_id, basin=basin, mode=mode, latent_vector=np.asarray(vec, dtype=np.float32))
+        return LatentState(
+            run_id=run_id,
+            basin=basin,
+            mode=mode,
+            latent_vector=np.asarray(vec, dtype=np.float32),
+            latent_source=LatentSource.EMBEDDING_PROXY,
+            capture_site=LatentSource.EMBEDDING_PROXY.value,
+        )
 
     def evolve_latent_state(
         self,
@@ -285,6 +300,7 @@ class LlamaCppBackend(RuntimeBackend):
             mode=mode,
             latent_vector=np.asarray(cap.vector, dtype=np.float32),
             capture_site=f"layer_{cap.layer}",
+            latent_source=LatentSource.TRUE_TENSOR_CAPTURE,
             layer_id=cap.layer,
             metadata=dict(cap.metadata),
         )

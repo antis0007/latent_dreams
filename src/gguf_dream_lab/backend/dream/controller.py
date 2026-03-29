@@ -39,6 +39,7 @@ class DreamTick:
     state_id: str
     phase: str
     mode: str
+    latent_source: str
     branch_id: str
     branch_seed: int
     branch_score: float
@@ -182,6 +183,7 @@ class DreamController:
                 state_id=latent.state_id,
                 phase=phase.value,
                 mode=latent.mode.value,
+                latent_source=latent.latent_source.value,
                 branch_id=str(latent.metadata.get("branch_id", "")),
                 branch_seed=int(latent.metadata.get("branch_seed", 0)),
                 branch_score=float(latent.metadata.get("branch_score", 0.0)),
