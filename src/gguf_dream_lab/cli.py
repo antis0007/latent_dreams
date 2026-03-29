@@ -9,6 +9,7 @@ from rich import print
 from gguf_dream_lab.backend.atlas.atlas import AtlasStorage, LatentAtlas
 from gguf_dream_lab.backend.dream.controller import DreamController
 from gguf_dream_lab.backend.runtime.llama_backend import LlamaCppBackend
+from gguf_dream_lab.backend.runtime.capability_contracts import MODE_CONTRACTS, RuntimeBehaviorSnapshot, validate_mode_contract
 from gguf_dream_lab.config.io import load_config, save_config
 from gguf_dream_lab.config.models import AppConfig
 from gguf_dream_lab.logging_utils import configure_logging
@@ -31,6 +32,13 @@ def diagnostics(config_path: Path | None = typer.Option(None, "--config")) -> No
     runtime = LlamaCppBackend(cfg.runtime)
     runtime.load()
     caps = runtime.capabilities()
+    behavior_snapshot = RuntimeBehaviorSnapshot(
+        capture=caps.supports_capture,
+        reinject=caps.supports_reinject,
+        decode_provenance=caps.supports_decode_provenance,
+        control_authority=caps.supports_control_authority,
+    )
+    contract = validate_mode_contract(caps.active_mode, behavior_snapshot)
     report = {
         "backend": caps.backend_name,
         "supports_embeddings": caps.supports_embeddings,
@@ -39,6 +47,19 @@ def diagnostics(config_path: Path | None = typer.Option(None, "--config")) -> No
         "supports_instrumented_latents": caps.supports_instrumented_latents,
         "active_mode": caps.active_mode.value,
         "capture_sites": caps.capture_sites,
+        "runtime_behaviors": {
+            "capture": caps.supports_capture,
+            "reinject": caps.supports_reinject,
+            "decode_provenance": caps.supports_decode_provenance,
+            "control_authority": caps.supports_control_authority,
+        },
+        "mode_contract": {
+            "claimed_mode": contract.claimed_mode.value,
+            "effective_mode": contract.effective_mode.value,
+            "required_behaviors_for_effective_mode": list(MODE_CONTRACTS[contract.effective_mode]),
+            "missing_behaviors_for_claim": contract.missing_behaviors,
+            "downgraded": contract.downgraded,
+        },
         "warnings": caps.warnings,
     }
     print(json.dumps(report, indent=2))

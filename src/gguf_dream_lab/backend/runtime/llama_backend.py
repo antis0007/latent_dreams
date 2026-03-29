@@ -20,6 +20,7 @@ from gguf_dream_lab.backend.instrumentation.adapters import (
 from gguf_dream_lab.config.models import RuntimeConfig
 
 from .base import RuntimeBackend, RuntimeCapabilities, TokenStep
+from .capability_contracts import RuntimeBehaviorSnapshot, validate_mode_contract
 
 logger = logging.getLogger(__name__)
 
@@ -96,11 +97,25 @@ class LlamaCppBackend(RuntimeBackend):
         supports_true = self.instrumentation.available() and verification.verified
         if verification.warning:
             warnings.append(verification.warning)
-        mode = DreamMode.TRUE_LATENT_INSTRUMENTED if supports_true else DreamMode.ENHANCED_LATENT
+        claimed_mode = DreamMode.TRUE_LATENT_INSTRUMENTED if supports_true else DreamMode.ENHANCED_LATENT
         if not self.config.embedding:
-            mode = DreamMode.BASELINE_APPROXIMATE
+            claimed_mode = DreamMode.BASELINE_APPROXIMATE
             warnings.append("Embeddings disabled; falling back to baseline approximate mode.")
         capture_sites = list(dict.fromkeys([*self.instrumentation.capture_sites(), *verification.capture_site_ids]))
+        behaviors = RuntimeBehaviorSnapshot(
+            capture=bool(self.config.embedding or supports_true),
+            reinject=bool(supports_true),
+            decode_provenance=True,
+            control_authority=bool(self.config.embedding or supports_true),
+        )
+        contract = validate_mode_contract(claimed_mode, behaviors)
+        if contract.downgraded:
+            missing = ", ".join(contract.missing_behaviors)
+            warnings.append(
+                "Capability contract downgrade: "
+                f"claimed_mode={contract.claimed_mode.value} -> effective_mode={contract.effective_mode.value}; "
+                f"missing=[{missing}]"
+            )
         return RuntimeCapabilities(
             supports_embeddings=self.config.embedding,
             supports_logits_all=self.config.logits_all,
@@ -110,7 +125,11 @@ class LlamaCppBackend(RuntimeBackend):
             backend_name="llama.cpp (via llama-cpp-python)" if self._llm else "synthetic-fallback",
             warnings=warnings,
             capture_sites=capture_sites,
-            active_mode=mode,
+            active_mode=contract.effective_mode,
+            supports_capture=behaviors.capture,
+            supports_reinject=behaviors.reinject,
+            supports_decode_provenance=behaviors.decode_provenance,
+            supports_control_authority=behaviors.control_authority,
         )
 
     def sample_step(self, prompt: str, max_tokens: int = 16) -> TokenStep:

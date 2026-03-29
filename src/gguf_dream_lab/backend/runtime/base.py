@@ -19,6 +19,10 @@ class RuntimeCapabilities:
     warnings: list[str]
     capture_sites: list[str] = field(default_factory=list)
     active_mode: DreamMode = DreamMode.BASELINE_APPROXIMATE
+    supports_capture: bool = False
+    supports_reinject: bool = False
+    supports_decode_provenance: bool = False
+    supports_control_authority: bool = False
 
 
 @dataclass
