@@ -140,6 +140,15 @@ def create_dash_app(config: AppConfig) -> Dash:
 
     @app.callback(
         Output("status", "children"),
+        Input("ticker", "n_intervals"),
+        Input("control-ack", "data"),
+    )
+    def refresh_status(_, __):
+        detail = f" — {controller.state.status_detail}" if controller.state.status_detail else ""
+        status_text = f"Status: {controller.state.status}{detail}"
+        return status_text
+
+    @app.callback(
         Output("preview", "children"),
         Output("committed", "children"),
         Output("metrics", "children"),
@@ -148,14 +157,12 @@ def create_dash_app(config: AppConfig) -> Dash:
         Input("ticker", "n_intervals"),
         Input("control-ack", "data"),
     )
-    def refresh(_, __):
-        detail = f" — {controller.state.status_detail}" if controller.state.status_detail else ""
-        status_text = f"Status: {controller.state.status}{detail}"
+    def refresh_stream(_, __):
         tick = controller.state.latest_tick
         if tick is None:
             fig = px.scatter(x=[0], y=[0], title="No latent states yet")
             fig.update_layout(template="plotly_dark")
-            return status_text, "", "", "No ticks yet.", fig, ""
+            return "", "", "No ticks yet.", fig, ""
 
         frame = controller.atlas.to_frame()
         color_mode = "coherence" if "coherence" in frame.columns else None
@@ -176,7 +183,7 @@ def create_dash_app(config: AppConfig) -> Dash:
             f"token_stability={tick.token_stability:.3f}\n"
             f"smoothness={tick.smoothness:.3f}"
         )
-        return status_text, tick.preview_text, tick.committed_text, metrics, fig, selected
+        return tick.preview_text, tick.committed_text, metrics, fig, selected
 
     return app
 
