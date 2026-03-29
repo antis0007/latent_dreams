@@ -23,7 +23,8 @@ def create_dash_app(config: AppConfig) -> Dash:
     app.title = "GGUF Dream Lab"
 
     app.layout = html.Div(
-        className="app-shell",
+        id="app-root",
+        className="app-shell theme-auto",
         children=[
             html.Div(
                 className="app-header",
@@ -87,8 +88,28 @@ def create_dash_app(config: AppConfig) -> Dash:
             ),
             dcc.Interval(id="ticker", interval=int(1000 / max(config.dream.tick_hz, 0.5)), n_intervals=0),
             dcc.Store(id="control-ack"),
+            dcc.Store(id="theme-store"),
+            dcc.Interval(id="theme-probe", interval=100, max_intervals=1, n_intervals=0),
         ],
     )
+
+    app.clientside_callback(
+        """
+        function(_) {
+            if (typeof window === 'undefined' || !window.matchMedia) {
+                return 'light';
+            }
+            return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+        """,
+        Output("theme-store", "data"),
+        Input("theme-probe", "n_intervals"),
+    )
+
+    @app.callback(Output("app-root", "className"), Input("theme-store", "data"))
+    def apply_theme(theme):
+        selected = "dark" if theme == "dark" else "light"
+        return f"app-shell theme-{selected}"
 
     @app.callback(
         Output("control-ack", "data"),

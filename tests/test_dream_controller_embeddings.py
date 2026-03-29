@@ -66,3 +66,32 @@ def test_should_commit_requires_threshold_and_stability_window():
 def test_merge_committed_chunk_appends_unique_chunk():
     updated = DreamController._merge_committed_chunk("the dream", "becomes stable", max_len=200)
     assert "becomes stable" in updated
+
+
+def test_smoothness_handles_shape_mismatch_without_crashing():
+    prev = np.ones(8, dtype=np.float32)
+    cur = np.ones(16, dtype=np.float32)
+
+    smoothness = DreamController._smoothness(prev, cur)
+
+    assert 0.0 <= smoothness <= 1.0
+
+
+def test_align_vector_shape_pads_and_preserves_prefix():
+    vec = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    ref = np.zeros(5, dtype=np.float32)
+
+    aligned = DreamController._align_vector_shape(vec, ref)
+
+    assert aligned.shape == ref.shape
+    assert np.allclose(aligned[:3], vec)
+    assert np.allclose(aligned[3:], 0.0)
+
+
+def test_smoothness_flattens_row_vectors():
+    prev = np.ones((1, 4), dtype=np.float32)
+    cur = np.ones((1, 4), dtype=np.float32)
+
+    smoothness = DreamController._smoothness(prev, cur)
+
+    assert 0.99 <= smoothness <= 1.0
