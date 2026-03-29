@@ -1,0 +1,26 @@
+.Select-control,
+.Select-menu-outer,
+.Select-menu,
+.Select__control,
+.Select__menu {
+  background-color: #0f141b !important;
+  border-color: #38445a !important;
+  color: #f2f4f8 !important;
+}
+
+.Select-value-label,
+.Select-placeholder,
+.Select-option,
+.Select input,
+.Select span {
+  color: #f2f4f8 !important;
+}
+
+.Select-option.is-focused,
+.Select-option:hover {
+  background-color: #243041 !important;
+}
+
+input[type="text"]::placeholder {
+  color: #95a0b3 !important;
+}

@@ -20,6 +20,26 @@ def create_dash_app(config: AppConfig) -> Dash:
     app = Dash(__name__)
     app.title = "GGUF Dream Lab"
 
+    panel_style = {"background": "#1a1f29", "padding": "12px", "borderRadius": "8px", "border": "1px solid #2a3140"}
+    control_style = {
+        "width": "100%",
+        "backgroundColor": "#0f141b",
+        "color": "#f2f4f8",
+        "border": "1px solid #38445a",
+        "borderRadius": "6px",
+        "padding": "8px 10px",
+    }
+    label_style = {"fontSize": "12px", "opacity": 0.85, "marginBottom": "4px", "marginTop": "8px", "display": "block"}
+    button_style = {
+        "marginTop": "10px",
+        "padding": "8px 12px",
+        "backgroundColor": "#243041",
+        "color": "#f2f4f8",
+        "border": "1px solid #3b4a63",
+        "borderRadius": "6px",
+        "cursor": "pointer",
+    }
+
     app.layout = html.Div(
         style={"backgroundColor": "#101318", "color": "#f2f4f8", "fontFamily": "Inter, Arial", "padding": "16px"},
         children=[
@@ -31,17 +51,37 @@ def create_dash_app(config: AppConfig) -> Dash:
                     html.Div(
                         [
                             html.H4("Runtime"),
-                            dcc.Input(id="model-path", value=str(config.runtime.model_path or ""), type="text", style={"width": "100%"}),
-                            dcc.Dropdown(id="basin", options=[{"label": b.value, "value": b.value} for b in Basin], value=config.dream.basin.value),
-                            dcc.Input(id="prompt", value=config.dream.prompt, type="text", placeholder="Optional dream seed prompt", style={"width": "100%"}),
+                            html.Label("Model path", style=label_style),
+                            dcc.Input(id="model-path", value=str(config.runtime.model_path or ""), type="text", style=control_style),
+                            html.Label("Dream basin", style=label_style),
+                            dcc.Dropdown(
+                                id="basin",
+                                options=[{"label": b.value, "value": b.value} for b in Basin],
+                                value=config.dream.basin.value,
+                                clearable=False,
+                                style={**control_style, "padding": "0"},
+                            ),
+                            html.Label("Prompt seed", style=label_style),
+                            dcc.Input(
+                                id="prompt",
+                                value=config.dream.prompt,
+                                type="text",
+                                placeholder="Optional dream seed prompt",
+                                style=control_style,
+                            ),
+                            html.Label("Coherence threshold", style=label_style),
                             dcc.Slider(id="threshold", min=0.3, max=0.95, step=0.01, value=config.dream.coherence_threshold),
                             html.Div(id="status", style={"marginTop": "8px", "fontWeight": "bold"}),
-                            html.Button("Start", id="start-btn", n_clicks=0),
-                            html.Button("Pause", id="pause-btn", n_clicks=0, style={"marginLeft": "8px"}),
-                            html.Button("Resume", id="resume-btn", n_clicks=0, style={"marginLeft": "8px"}),
-                            html.Button("Stop", id="stop-btn", n_clicks=0, style={"marginLeft": "8px"}),
+                            html.Div(
+                                [
+                                    html.Button("Start", id="start-btn", n_clicks=0, style=button_style),
+                                    html.Button("Pause", id="pause-btn", n_clicks=0, style={**button_style, "marginLeft": "8px"}),
+                                    html.Button("Resume", id="resume-btn", n_clicks=0, style={**button_style, "marginLeft": "8px"}),
+                                    html.Button("Stop", id="stop-btn", n_clicks=0, style={**button_style, "marginLeft": "8px"}),
+                                ]
+                            ),
                         ],
-                        style={"background": "#1a1f29", "padding": "12px", "borderRadius": "8px"},
+                        style=panel_style,
                     ),
                     html.Div(
                         [
@@ -50,7 +90,7 @@ def create_dash_app(config: AppConfig) -> Dash:
                             html.H4("Committed Transcript"),
                             html.Div(id="committed", style={"minHeight": "180px", "fontSize": "18px"}),
                         ],
-                        style={"background": "#1a1f29", "padding": "12px", "borderRadius": "8px"},
+                        style=panel_style,
                     ),
                     html.Div(
                         [
@@ -59,7 +99,7 @@ def create_dash_app(config: AppConfig) -> Dash:
                             html.H4("Selected State"),
                             html.Div(id="selected-state"),
                         ],
-                        style={"background": "#1a1f29", "padding": "12px", "borderRadius": "8px"},
+                        style=panel_style,
                     ),
                 ],
             ),
