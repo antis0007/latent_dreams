@@ -119,6 +119,22 @@ def create_dash_app(config: AppConfig) -> Dash:
                             dcc.Slider(id="scrub-step", min=0, max=1, step=1, value=0),
                             html.Div(id="step-info", className="meta-line"),
                             html.Div(id="selected-state", className="selected-state"),
+                            html.H4("Lineage replay", className="panel-title"),
+                            html.Label("Lineage path", className="control-label"),
+                            dcc.Dropdown(
+                                id="lineage-path",
+                                options=[],
+                                value=None,
+                                placeholder="Select a saved lineage path",
+                                className="control-field",
+                            ),
+                            html.Div(
+                                className="button-row",
+                                children=[
+                                    html.Button("Replay", id="replay-start-btn", className="control-btn"),
+                                    html.Button("Stop replay", id="replay-stop-btn", className="control-btn"),
+                                ],
+                            ),
                         ],
                     ),
                 ],
@@ -127,7 +143,9 @@ def create_dash_app(config: AppConfig) -> Dash:
             dcc.Store(id="control-ack"),
             dcc.Store(id="theme-store"),
             dcc.Store(id="run-ui-state", data={"latest_run_id": None}),
+            dcc.Store(id="timeline-cache", data={"run_id": None, "ticks": [], "paths": []}),
             dcc.Interval(id="theme-probe", interval=100, max_intervals=1, n_intervals=0),
+            dcc.Interval(id="replay-timer", interval=400, n_intervals=0, disabled=True),
         ],
     )
 
@@ -242,6 +260,62 @@ def create_dash_app(config: AppConfig) -> Dash:
 
         return options, selected, {"latest_run_id": latest_run_id}, scrub_max, next_scrub
 
+    @app.callback(
+        Output("timeline-cache", "data"),
+        Output("lineage-path", "options"),
+        Output("lineage-path", "value"),
+        Input("run-filter", "value"),
+        prevent_initial_call=False,
+    )
+    def load_timeline(run_filter):
+        if not run_filter:
+            return {"run_id": None, "ticks": [], "paths": []}, [], None
+        run_id = run_filter[-1]
+        timeline = session_store.load_timeline(run_id)
+        options = [{"label": path["label"], "value": path["id"]} for path in timeline.get("paths", [])]
+        selected = options[0]["value"] if options else None
+        return timeline, options, selected
+
+    @app.callback(
+        Output("replay-timer", "disabled"),
+        Input("replay-start-btn", "n_clicks"),
+        Input("replay-stop-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def set_replay_mode(_, __):
+        return ctx.triggered_id != "replay-start-btn"
+
+    @app.callback(
+        Output("scrub-step", "value", allow_duplicate=True),
+        Input("replay-timer", "n_intervals"),
+        State("replay-timer", "disabled"),
+        State("timeline-cache", "data"),
+        State("lineage-path", "value"),
+        State("scrub-step", "value"),
+        prevent_initial_call=True,
+    )
+    def replay_tick(_, replay_disabled, timeline, lineage_path_id, scrub_step):
+        if replay_disabled:
+            return scrub_step
+        timeline = timeline or {}
+        paths = timeline.get("paths", [])
+        if not paths:
+            return scrub_step
+        selected = next((p for p in paths if p.get("id") == lineage_path_id), paths[0])
+        state_ids = set(selected.get("state_ids", []))
+        path_steps = sorted(
+            int(t.get("step_idx", -1))
+            for t in timeline.get("ticks", [])
+            if str(t.get("state_id")) in state_ids and int(t.get("step_idx", -1)) >= 0
+        )
+        if not path_steps:
+            return scrub_step
+        current_step = int(scrub_step or path_steps[0])
+        for step in path_steps:
+            if step > current_step:
+                return step
+        return path_steps[0]
+
     @app.callback(Output("status", "children"), Input("ticker", "n_intervals"))
     def refresh_status(_):
         detail = f" ({controller.state.status_detail})" if controller.state.status_detail else ""
@@ -300,8 +374,10 @@ def create_dash_app(config: AppConfig) -> Dash:
         Input("ticker", "n_intervals"),
         Input("scrub-step", "value"),
         Input("run-filter", "value"),
+        Input("timeline-cache", "data"),
+        Input("lineage-path", "value"),
     )
-    def refresh_stream(_, scrub_step, run_filter):
+    def refresh_stream(_, scrub_step, run_filter, timeline, lineage_path_id):
         frame = controller.atlas.to_frame()
         if frame.empty:
             fig = px.scatter(x=[0], y=[0], title="No latent states yet")
@@ -322,6 +398,13 @@ def create_dash_app(config: AppConfig) -> Dash:
             selected = frame[frame["step_idx"] == max_step].tail(1)
             selected_step = max_step
         tick = controller.state.latest_tick
+        timeline = timeline or {}
+        timeline_ticks = timeline.get("ticks", [])
+        lineage_state_ids = set()
+        for path in timeline.get("paths", []):
+            if path.get("id") == lineage_path_id:
+                lineage_state_ids = set(path.get("state_ids", []))
+                break
 
         traj = frame.sort_values("step_idx")
         fig = px.scatter(
@@ -384,6 +467,21 @@ def create_dash_app(config: AppConfig) -> Dash:
                 f"density={tick.local_density:.3f}\n"
                 f"stability={tick.token_stability:.3f}"
             )
+
+        if timeline_ticks:
+            replay_row = next((row for row in timeline_ticks if int(row.get("step_idx", -1)) == selected_step), None)
+            if replay_row and (not lineage_state_ids or str(replay_row.get("state_id")) in lineage_state_ids):
+                preview_text = str(replay_row.get("preview_text") or preview_text)
+                committed_text = str(replay_row.get("committed_text") or committed_text)
+                metrics = (
+                    f"mode={replay_row.get('mode', 'unknown')}\n"
+                    f"phase={replay_row.get('phase', 'unknown')}\n"
+                    f"parent_state={replay_row.get('parent_state_id', '')}\n"
+                    f"branch_id={replay_row.get('branch_id', '')}\n"
+                    f"branch_score={float(replay_row.get('branch_score', 0.0)):.3f}\n"
+                    f"candidate_scores={replay_row.get('candidate_scores', '[]')}\n"
+                    f"decode_provenance={replay_row.get('decode_provenance', 'unknown')}"
+                )
 
         return preview_text, committed_text, metrics, fig, step_info, selected_txt
     return app
