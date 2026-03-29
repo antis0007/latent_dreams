@@ -39,6 +39,7 @@ class DreamTick:
     state_id: str
     phase: str
     mode: str
+    commit_source: str
     latent_source: str
     branch_id: str
     branch_seed: int
@@ -183,6 +184,7 @@ class DreamController:
                 state_id=latent.state_id,
                 phase=phase.value,
                 mode=latent.mode.value,
+                commit_source=str(latent.metadata.get("commit_source", "none")),
                 latent_source=latent.latent_source.value,
                 branch_id=str(latent.metadata.get("branch_id", "")),
                 branch_seed=int(latent.metadata.get("branch_seed", 0)),
