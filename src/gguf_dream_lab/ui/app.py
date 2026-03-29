@@ -28,6 +28,7 @@ def create_dash_app(config: AppConfig) -> Dash:
         children=[
             html.H2("GGUF Dream Lab"),
             html.Div(id="capability", style={"marginBottom": "8px", "opacity": 0.9}),
+            html.Div(id="status", style={"marginBottom": "8px", "fontWeight": 600}),
             html.Div([
                 html.Label("Basin"),
                 dcc.Dropdown(id="basin", options=[{"label": b.value, "value": b.value} for b in Basin], value=config.dream.basin.value),
@@ -84,6 +85,13 @@ def create_dash_app(config: AppConfig) -> Dash:
             atlas_store.save(controller.atlas)
             session_store.save_ticks(controller.state.run_id, controller.tick_history, metadata={"dream": config.dream.model_dump()})
         return {"at": time(), "status": controller.state.status}
+
+
+
+    @app.callback(Output("status", "children"), Input("ticker", "n_intervals"), Input("control-ack", "data"))
+    def refresh_status(_, __):
+        detail = f" ({controller.state.status_detail})" if controller.state.status_detail else ""
+        return f"Status: {controller.state.status}{detail}"
 
     @app.callback(Output("capability", "children"), Input("ticker", "n_intervals"))
     def refresh_capability(_):
