@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from time import time
 
 import plotly.express as px
@@ -24,29 +23,68 @@ def create_dash_app(config: AppConfig) -> Dash:
     app.title = "GGUF Dream Lab"
 
     app.layout = html.Div(
-        style={"backgroundColor": "#101318", "color": "#f2f4f8", "fontFamily": "Inter, Arial", "padding": "16px"},
+        className="app-shell",
         children=[
-            html.H2("GGUF Dream Lab"),
-            html.Div(id="capability", style={"marginBottom": "8px", "opacity": 0.9}),
-            html.Div(id="status", style={"marginBottom": "8px", "fontWeight": 600}),
-            html.Div([
-                html.Label("Basin"),
-                dcc.Dropdown(id="basin", options=[{"label": b.value, "value": b.value} for b in Basin], value=config.dream.basin.value),
-                html.Label("Prompt"), dcc.Input(id="prompt", value=config.dream.prompt, type="text", style={"width": "100%"}),
-                html.Label("Tick rate (Hz)"), dcc.Slider(id="tick-hz", min=0.5, max=8, step=0.5, value=config.dream.tick_hz),
-                html.Label("Coherence threshold"), dcc.Slider(id="threshold", min=0.3, max=0.95, step=0.01, value=config.dream.coherence_threshold),
-                html.Label("Noise amplitude"), dcc.Slider(id="noise", min=0.01, max=0.6, step=0.01, value=config.dream.noise_amplitude),
-                html.Label("Branch count"), dcc.Slider(id="branches", min=1, max=5, step=1, value=config.dream.branch_count),
-                html.Button("Start", id="start-btn"), html.Button("Pause", id="pause-btn"), html.Button("Resume", id="resume-btn"), html.Button("Stop", id="stop-btn"),
-            ]),
-            html.H4("Preview (provisional recall)"),
-            html.Div(id="preview", style={"fontStyle": "italic", "opacity": 0.6, "minHeight": "80px"}),
-            html.H4("Committed (crystallized recall)"),
-            html.Div(id="committed", style={"minHeight": "80px"}),
-            html.Pre(id="metrics"),
-            dcc.Graph(id="latent-graph", style={"height": "500px"}),
-            dcc.Slider(id="scrub-step", min=0, max=1, step=1, value=0),
-            html.Div(id="selected-state"),
+            html.Div(
+                className="app-header",
+                children=[
+                    html.H2("GGUF Dream Lab", className="app-title"),
+                    html.Div(id="capability", className="meta-line"),
+                    html.Div(id="status", className="status-line"),
+                ],
+            ),
+            html.Div(
+                className="layout-grid",
+                children=[
+                    html.Section(
+                        className="panel controls-panel",
+                        children=[
+                            html.H4("Controls", className="panel-title"),
+                            html.Label("Basin", className="control-label"),
+                            dcc.Dropdown(
+                                id="basin",
+                                options=[{"label": b.value, "value": b.value} for b in Basin],
+                                value=config.dream.basin.value,
+                                className="control-field",
+                                clearable=False,
+                            ),
+                            html.Label("Prompt", className="control-label"),
+                            dcc.Input(id="prompt", value=config.dream.prompt, type="text", className="text-input"),
+                            html.Label("Tick rate (Hz)", className="control-label"),
+                            dcc.Slider(id="tick-hz", min=0.5, max=8, step=0.5, value=config.dream.tick_hz),
+                            html.Label("Coherence threshold", className="control-label"),
+                            dcc.Slider(id="threshold", min=0.3, max=0.95, step=0.01, value=config.dream.coherence_threshold),
+                            html.Label("Noise amplitude", className="control-label"),
+                            dcc.Slider(id="noise", min=0.01, max=0.6, step=0.01, value=config.dream.noise_amplitude),
+                            html.Label("Branch count", className="control-label"),
+                            dcc.Slider(id="branches", min=1, max=5, step=1, value=config.dream.branch_count),
+                            html.Div(
+                                className="button-row",
+                                children=[
+                                    html.Button("Start", id="start-btn", className="control-btn"),
+                                    html.Button("Pause", id="pause-btn", className="control-btn"),
+                                    html.Button("Resume", id="resume-btn", className="control-btn"),
+                                    html.Button("Stop", id="stop-btn", className="control-btn stop-btn"),
+                                ],
+                            ),
+                        ],
+                    ),
+                    html.Section(
+                        className="panel content-panel",
+                        children=[
+                            html.H4("Preview (provisional recall)", className="panel-title"),
+                            html.Div(id="preview", className="text-block preview-block"),
+                            html.H4("Committed (crystallized recall)", className="panel-title"),
+                            html.Div(id="committed", className="text-block"),
+                            html.Pre(id="metrics", className="metrics-block"),
+                            dcc.Graph(id="latent-graph", className="latent-graph"),
+                            html.Label("Scrub by step", className="control-label"),
+                            dcc.Slider(id="scrub-step", min=0, max=1, step=1, value=0),
+                            html.Div(id="selected-state", className="selected-state"),
+                        ],
+                    ),
+                ],
+            ),
             dcc.Interval(id="ticker", interval=int(1000 / max(config.dream.tick_hz, 0.5)), n_intervals=0),
             dcc.Store(id="control-ack"),
         ],
@@ -131,7 +169,6 @@ def create_dash_app(config: AppConfig) -> Dash:
             return "", "", "No ticks yet.", fig, selected_txt
         metrics = f"mode={tick.mode}\nphase={tick.phase}\ncoherence={tick.coherence:.3f}\nentropy={tick.entropy:.3f}\ndensity={tick.local_density:.3f}\nstability={tick.token_stability:.3f}"
         return tick.preview_text, tick.committed_text, metrics, fig, selected_txt
-
 
     @app.callback(Output("scrub-step", "max"), Input("ticker", "n_intervals"))
     def refresh_scrub_max(_):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import random
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -45,20 +46,42 @@ class LlamaCppBackend(RuntimeBackend):
         try:
             from llama_cpp import Llama
 
-            self._llm = Llama(
-                model_path=str(model_path),
-                n_ctx=self.config.n_ctx,
-                n_gpu_layers=self.config.n_gpu_layers,
-                n_batch=self.config.n_batch,
-                n_ubatch=self.config.n_ubatch,
-                logits_all=self.config.logits_all,
-                embedding=self.config.embedding,
-                offload_kqv=self.config.offload_kqv,
-                flash_attn=self.config.flash_attn,
-                seed=self.config.seed,
-                verbose=False,
-            )
-            logger.info("Loaded GGUF model: %s", model_path)
+            holder: dict[str, Any] = {}
+            error_holder: list[Exception] = []
+
+            def _construct() -> None:
+                try:
+                    holder["llm"] = Llama(
+                        model_path=str(model_path),
+                        n_ctx=self.config.n_ctx,
+                        n_gpu_layers=self.config.n_gpu_layers,
+                        n_batch=self.config.n_batch,
+                        n_ubatch=self.config.n_ubatch,
+                        logits_all=self.config.logits_all,
+                        embedding=self.config.embedding,
+                        offload_kqv=self.config.offload_kqv,
+                        flash_attn=self.config.flash_attn,
+                        seed=self.config.seed,
+                        verbose=False,
+                    )
+                except Exception as inner_exc:
+                    error_holder.append(inner_exc)
+
+            loader = threading.Thread(target=_construct, daemon=True)
+            loader.start()
+            loader.join(timeout=max(float(self.config.load_timeout_sec), 0.1))
+
+            if loader.is_alive():
+                self._llama_error = (
+                    f"Model load timed out after {self.config.load_timeout_sec:.1f}s; "
+                    "using synthetic backend behavior."
+                )
+                logger.warning(self._llama_error)
+            elif error_holder:
+                raise error_holder[0]
+            else:
+                self._llm = holder.get("llm")
+                logger.info("Loaded GGUF model: %s", model_path)
         except Exception as exc:  # graceful degradation path
             self._llama_error = f"Failed to initialize llama-cpp-python: {exc}"
             logger.warning(self._llama_error)
