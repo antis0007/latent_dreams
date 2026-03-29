@@ -43,7 +43,14 @@ class RuntimeBackend(Protocol):
 
     def capture_latent_state(self, run_id: str, basin: str, prompt: str) -> LatentState: ...
 
-    def evolve_latent_state(self, state: LatentState, target_vector: np.ndarray, noise_scale: float) -> LatentState: ...
+    def evolve_latent_state(
+        self,
+        state: LatentState,
+        target_vector: np.ndarray,
+        noise_scale: float,
+        *,
+        noise_seed: int | None = None,
+    ) -> LatentState: ...
 
     def decode_prompt_conditioned_preview_from_latent(self, state: LatentState, max_tokens: int = 16) -> str: ...
 
