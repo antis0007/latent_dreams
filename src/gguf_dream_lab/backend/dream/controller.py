@@ -119,7 +119,7 @@ class DreamController:
             phase = self._phase_for_step(self.state.step_idx)
             candidates = self._branch_candidates(latent, cfg, anneal, phase)
             latent = self._choose_candidate(candidates)
-            preview = self.runtime.decode_preview_from_latent(latent, max_tokens=max(12, cfg.preview_decode_cadence * 16))
+            preview = self._decode_preview(latent, max_tokens=max(12, cfg.preview_decode_cadence * 16))
             self.state.preview_text = preview[-cfg.max_preview_len :]
             preview_history.append(self.state.preview_text)
             token_stability = self._token_stability(preview_history)
@@ -185,6 +185,12 @@ class DreamController:
             time.sleep(max(period - elapsed, 0.0))
 
         self.state.active = False
+
+    def _decode_preview(self, latent: LatentState, max_tokens: int) -> str:
+        caps = self.runtime.capabilities()
+        if caps.supports_instrumented_latents and caps.supports_true_latent_readout:
+            return self.runtime.decode_true_latent_readout_preview(latent, max_tokens=max_tokens)
+        return self.runtime.decode_prompt_conditioned_preview_from_latent(latent, max_tokens=max_tokens)
 
     def _seed_latent_state(self, cfg: DreamConfig, prompt: str) -> LatentState:
         basin_vec = self.atlas.sample_seed_from_basin(cfg.basin.value)

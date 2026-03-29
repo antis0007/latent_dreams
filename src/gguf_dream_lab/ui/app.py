@@ -75,7 +75,7 @@ def create_dash_app(config: AppConfig) -> Dash:
                     html.Section(
                         className="panel content-panel",
                         children=[
-                            html.H4("Preview (provisional recall)", className="panel-title"),
+                            html.H4("Preview (provisional recall)", id="preview-title", className="panel-title"),
                             html.Div(id="preview", className="text-block preview-block"),
                             html.H4("Committed (crystallized recall)", className="panel-title"),
                             html.Div(id="committed", className="text-block"),
@@ -250,6 +250,13 @@ def create_dash_app(config: AppConfig) -> Dash:
     def refresh_capability(_):
         caps = runtime.capabilities()
         return f"Mode: {caps.active_mode.value} | backend: {caps.backend_name} | capture_sites: {caps.capture_sites or ['none']}"
+
+    @app.callback(Output("preview-title", "children"), Input("ticker", "n_intervals"))
+    def refresh_preview_title(_):
+        caps = runtime.capabilities()
+        if caps.supports_instrumented_latents and caps.supports_true_latent_readout:
+            return "Preview (true latent readout)"
+        return "Preview (prompt-conditioned approximation)"
 
     @app.callback(
         Output("scrub-step", "value"),
