@@ -184,12 +184,20 @@ class LlamaCppBackend(RuntimeBackend):
             capture_site=LatentSource.EMBEDDING_PROXY.value,
         )
 
-    def evolve_latent_state(self, state: LatentState, target_vector: np.ndarray, noise_scale: float) -> LatentState:
+    def evolve_latent_state(
+        self,
+        state: LatentState,
+        target_vector: np.ndarray,
+        noise_scale: float,
+        *,
+        noise_seed: int | None = None,
+    ) -> LatentState:
         target = np.asarray(target_vector, dtype=np.float32)
         if target.shape != state.latent_vector.shape:
             target = np.resize(target, state.latent_vector.shape)
         proposal = 0.7 * state.latent_vector + 0.3 * target
-        proposal = proposal + np.random.normal(scale=noise_scale, size=proposal.shape).astype(np.float32)
+        rng = np.random.default_rng(noise_seed)
+        proposal = proposal + rng.normal(scale=noise_scale, size=proposal.shape).astype(np.float32)
         if state.mode == DreamMode.TRUE_LATENT_INSTRUMENTED:
             injected = self.instrumentation.reinject(LatentCapture(layer=state.layer_id or 0, vector=proposal, metadata={}))
             state.metadata["reinject_ok"] = injected

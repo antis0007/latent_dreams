@@ -5,6 +5,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+import hashlib
 
 import numpy as np
 
@@ -12,7 +13,7 @@ from gguf_dream_lab.backend.atlas.atlas import LatentAtlas, TransitionEdge
 from gguf_dream_lab.backend.dream.coherence import score_coherence
 from gguf_dream_lab.backend.dream.state import DreamMode, DreamPhase, LatentState
 from gguf_dream_lab.backend.runtime.base import RuntimeBackend
-from gguf_dream_lab.config.models import Basin, DreamConfig
+from gguf_dream_lab.config.models import Basin, CoherenceWeights, DreamConfig
 
 SEED_BASIN_PREFIX = {
     Basin.NULL_PRIOR: "",
@@ -39,6 +40,9 @@ class DreamTick:
     phase: str
     mode: str
     latent_source: str
+    branch_id: str
+    branch_seed: int
+    branch_score: float
     status: str
 
 
@@ -118,8 +122,8 @@ class DreamController:
 
             tick_start = time.perf_counter()
             phase = self._phase_for_step(self.state.step_idx)
-            candidates = self._branch_candidates(latent, cfg, anneal, phase)
-            latent = self._choose_candidate(candidates)
+            candidates = self._branch_candidates(latent, cfg, anneal, phase, step_idx=self.state.step_idx)
+            latent = self._choose_candidate(candidates, prev_latent=latent)
             preview = self._decode_preview(latent, max_tokens=max(12, cfg.preview_decode_cadence * 16))
             self.state.preview_text = preview[-cfg.max_preview_len :]
             preview_history.append(self.state.preview_text)
@@ -160,6 +164,9 @@ class DreamController:
                         distance=dist,
                         curvature=abs(1.0 - smoothness),
                         speed=dist * cfg.tick_hz,
+                        branch_id=str(latent.metadata.get("branch_id", "")),
+                        branch_seed=int(latent.metadata.get("branch_seed", 0)),
+                        branch_score=float(latent.metadata.get("branch_score", 0.0)),
                     )
                 )
 
@@ -177,6 +184,9 @@ class DreamController:
                 phase=phase.value,
                 mode=latent.mode.value,
                 latent_source=latent.latent_source.value,
+                branch_id=str(latent.metadata.get("branch_id", "")),
+                branch_seed=int(latent.metadata.get("branch_seed", 0)),
+                branch_score=float(latent.metadata.get("branch_score", 0.0)),
                 status=self.state.status,
             )
             self.state.latest_tick = tick
@@ -205,23 +215,109 @@ class DreamController:
         latent.metadata["prompt_seed"] = prompt
         return latent
 
-    def _branch_candidates(self, latent: LatentState, cfg: DreamConfig, anneal: float, phase: DreamPhase) -> list[LatentState]:
+    def _branch_candidates(
+        self,
+        latent: LatentState,
+        cfg: DreamConfig,
+        anneal: float,
+        phase: DreamPhase,
+        *,
+        step_idx: int,
+    ) -> list[LatentState]:
         neighbors = self._neighbor_vector(latent.latent_vector)
         candidates = []
-        for _ in range(max(cfg.branch_count, 1)):
+        branch_count = max(cfg.branch_count, 1)
+        for branch_idx in range(branch_count):
+            branch_id = f"{step_idx:06d}-b{branch_idx:02d}"
+            branch_seed = self._branch_seed(self.state.run_id, step_idx, branch_idx)
+            rng = np.random.default_rng(branch_seed)
             target = 0.7 * neighbors + 0.3 * latent.latent_vector
-            proposal = self.runtime.evolve_latent_state(latent, target_vector=target, noise_scale=cfg.noise_amplitude * anneal)
+            perturb = rng.normal(scale=cfg.noise_amplitude * anneal * 0.5, size=target.shape).astype(np.float32)
+            proposal = self.runtime.evolve_latent_state(
+                latent,
+                target_vector=target + perturb,
+                noise_scale=cfg.noise_amplitude * anneal,
+                noise_seed=branch_seed,
+            )
             proposal = self._normalize_latent_state(proposal)
             proposal.phase = phase
-            proposal.metadata["branch_agreement"] = 1.0 if cfg.branch_count == 1 else 1.0 - (cfg.noise_amplitude * anneal * 0.25)
+            branch_agreement = 1.0 if branch_count == 1 else 1.0 - (cfg.noise_amplitude * anneal * 0.25)
+            branch_smoothness = self._smoothness(latent.latent_vector, proposal.latent_vector)
+            branch_density = self._estimate_local_density(proposal.latent_vector)
+            branch_coherence_estimate = self._branch_coherence_estimate(
+                local_density=branch_density,
+                smoothness=branch_smoothness,
+                branch_agreement=branch_agreement,
+                weights=cfg.weights,
+            )
+            distance_to_attractor = self._distance_to_attractor(proposal.latent_vector, basin=proposal.basin)
+            branch_score = self._branch_score(
+                coherence_estimate=branch_coherence_estimate,
+                distance_to_attractor=distance_to_attractor,
+                temporal_smoothness=branch_smoothness,
+            )
+            proposal.metadata["branch_agreement"] = branch_agreement
+            proposal.metadata["branch_id"] = branch_id
+            proposal.metadata["branch_seed"] = branch_seed
+            proposal.metadata["branch_density_estimate"] = branch_density
+            proposal.metadata["branch_coherence_estimate"] = branch_coherence_estimate
+            proposal.metadata["distance_to_attractor"] = distance_to_attractor
+            proposal.metadata["temporal_smoothness"] = branch_smoothness
+            proposal.metadata["branch_score"] = branch_score
             candidates.append(proposal)
         return candidates
 
-    def _choose_candidate(self, candidates: list[LatentState]) -> LatentState:
+    def _choose_candidate(self, candidates: list[LatentState], *, prev_latent: LatentState) -> LatentState:
         if len(candidates) == 1:
             return candidates[0]
-        scores = [float(np.linalg.norm(c.latent_vector)) for c in candidates]
-        return candidates[int(np.argmax(scores))]
+        scored = sorted(
+            enumerate(candidates),
+            key=lambda item: float(item[1].metadata.get("branch_score", float("-inf"))),
+            reverse=True,
+        )
+        for rank, (_, candidate) in enumerate(scored, start=1):
+            candidate.metadata["branch_rank"] = rank
+        selected = scored[0][1]
+        selected.metadata["selected_from_state_id"] = prev_latent.state_id
+        return selected
+
+    def _distance_to_attractor(self, vec: np.ndarray, *, basin: str) -> float:
+        attractors = self.atlas.candidate_attractors(basin=basin, top_k=5)
+        if not attractors:
+            return 0.0
+        dists = [float(np.linalg.norm(self._align_vector_shape(p.embedding, vec) - vec)) for p in attractors]
+        return min(dists) if dists else 0.0
+
+    def _branch_coherence_estimate(
+        self,
+        *,
+        local_density: float,
+        smoothness: float,
+        branch_agreement: float,
+        weights: CoherenceWeights,
+    ) -> float:
+        entropy = max(0.01, 1.0 - min(local_density / 4.0, 0.9))
+        return score_coherence(
+            entropy=entropy,
+            local_density=local_density,
+            token_stability=0.5,
+            smoothness=smoothness,
+            branch_agreement=branch_agreement,
+            known_state_similarity=min(local_density / 5.0, 1.0),
+            weights=weights,
+        )
+
+    @staticmethod
+    def _branch_score(*, coherence_estimate: float, distance_to_attractor: float, temporal_smoothness: float) -> float:
+        distance_penalty = min(distance_to_attractor / 3.0, 1.0)
+        score = (0.65 * coherence_estimate) + (0.25 * temporal_smoothness) - (0.35 * distance_penalty)
+        return float(score)
+
+    @staticmethod
+    def _branch_seed(run_id: str, step_idx: int, branch_idx: int) -> int:
+        payload = f"{run_id}:{step_idx}:{branch_idx}".encode("utf-8")
+        digest = hashlib.blake2b(payload, digest_size=8).digest()
+        return int.from_bytes(digest, byteorder="big", signed=False)
 
     def _neighbor_vector(self, current: np.ndarray) -> np.ndarray:
         if not self.atlas.points:

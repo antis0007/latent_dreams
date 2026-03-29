@@ -57,6 +57,9 @@ class TransitionEdge:
     distance: float
     curvature: float
     speed: float
+    branch_id: str = ""
+    branch_seed: int = 0
+    branch_score: float = 0.0
 
 
 @dataclass
