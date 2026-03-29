@@ -81,6 +81,39 @@ def create_dash_app(config: AppConfig) -> Dash:
                             html.Div(id="committed", className="text-block"),
                             html.Pre(id="metrics", className="metrics-block"),
                             dcc.Graph(id="latent-graph", className="latent-graph"),
+                            html.Div(
+                                className="run-controls-row",
+                                children=[
+                                    html.Div(
+                                        className="run-filter-wrap",
+                                        children=[
+                                            html.Label("Runs to display", className="control-label"),
+                                            dcc.Dropdown(
+                                                id="run-filter",
+                                                options=[],
+                                                value=[],
+                                                multi=True,
+                                                placeholder="Select one or more runs",
+                                                className="control-field",
+                                            ),
+                                        ],
+                                    ),
+                                    html.Div(
+                                        className="run-actions",
+                                        children=[
+                                            html.Button("Select all", id="select-all-runs-btn", className="control-btn"),
+                                            html.Button("Clear selection", id="clear-selection-btn", className="control-btn"),
+                                            html.Button("Clear atlas", id="clear-atlas-btn", className="control-btn stop-btn"),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                            dcc.Checklist(
+                                id="follow-latest",
+                                options=[{"label": "Auto-follow latest step", "value": "follow"}],
+                                value=["follow"],
+                                className="follow-latest-toggle",
+                            ),
                             html.Label("Scrub by step", className="control-label"),
                             dcc.Slider(id="scrub-step", min=0, max=1, step=1, value=0),
                             html.Div(id="step-info", className="meta-line"),
@@ -92,6 +125,7 @@ def create_dash_app(config: AppConfig) -> Dash:
             dcc.Interval(id="ticker", interval=int(1000 / max(config.dream.tick_hz, 0.5)), n_intervals=0),
             dcc.Store(id="control-ack"),
             dcc.Store(id="theme-store"),
+            dcc.Store(id="run-ui-state", data={"latest_run_id": None}),
             dcc.Interval(id="theme-probe", interval=100, max_intervals=1, n_intervals=0),
         ],
     )
@@ -148,6 +182,65 @@ def create_dash_app(config: AppConfig) -> Dash:
             session_store.save_ticks(controller.state.run_id, controller.tick_history, metadata={"dream": config.dream.model_dump()})
         return {"at": time(), "status": controller.state.status}
 
+    @app.callback(
+        Output("run-filter", "options"),
+        Output("run-filter", "value"),
+        Output("run-ui-state", "data"),
+        Output("scrub-step", "max"),
+        Output("scrub-step", "value"),
+        Input("ticker", "n_intervals"),
+        Input("start-btn", "n_clicks"),
+        Input("select-all-runs-btn", "n_clicks"),
+        Input("clear-selection-btn", "n_clicks"),
+        Input("clear-atlas-btn", "n_clicks"),
+        Input("run-filter", "value"),
+        Input("follow-latest", "value"),
+        State("run-ui-state", "data"),
+        State("scrub-step", "value"),
+        prevent_initial_call=False,
+    )
+    def sync_run_controls(_, __, select_all, clear_selection, clear_atlas, current_filter, follow_latest, ui_state, scrub_step):
+        trigger = ctx.triggered_id
+        if trigger == "clear-atlas-btn":
+            controller.atlas.clear()
+            controller.tick_history = []
+            controller.state.step_idx = 0
+            controller.state.latest_tick = None
+            atlas_store.save(controller.atlas)
+            return [], [], {"latest_run_id": None}, 1, 0
+
+        frame = controller.atlas.to_frame()
+        if frame.empty:
+            return [], [], {"latest_run_id": None}, 1, 0
+
+        run_meta = frame[["run_id", "run_label"]].drop_duplicates().tail(40)
+        options = [{"label": f"{row.run_label} · {row.run_id[:8]}", "value": row.run_id} for row in run_meta.itertuples(index=False)]
+        available = {o["value"] for o in options}
+        selected = [rid for rid in (current_filter or []) if rid in available]
+        latest_run_id = str(frame["run_id"].iloc[-1])
+        previous_latest = (ui_state or {}).get("latest_run_id")
+
+        if trigger == "select-all-runs-btn":
+            selected = [o["value"] for o in options]
+        elif trigger == "clear-selection-btn":
+            selected = []
+        elif not selected:
+            selected = [o["value"] for o in options]
+
+        if latest_run_id != previous_latest and latest_run_id not in selected:
+            selected = selected + [latest_run_id]
+
+        filtered = frame[frame["run_id"].isin(selected)] if selected else frame.iloc[0:0]
+        scrub_max = int(filtered["step_idx"].max()) if not filtered.empty else 1
+        current_scrub = int(scrub_step or 0)
+        auto_follow = "follow" in (follow_latest or [])
+        if auto_follow or latest_run_id != previous_latest:
+            next_scrub = scrub_max
+        else:
+            next_scrub = max(0, min(current_scrub, scrub_max))
+
+        return options, selected, {"latest_run_id": latest_run_id}, scrub_max, next_scrub
+
     @app.callback(Output("status", "children"), Input("ticker", "n_intervals"))
     def refresh_status(_):
         detail = f" ({controller.state.status_detail})" if controller.state.status_detail else ""
@@ -183,13 +276,21 @@ def create_dash_app(config: AppConfig) -> Dash:
         Output("selected-state", "children"),
         Input("ticker", "n_intervals"),
         Input("scrub-step", "value"),
+        Input("run-filter", "value"),
     )
-    def refresh_stream(_, scrub_step):
+    def refresh_stream(_, scrub_step, run_filter):
         frame = controller.atlas.to_frame()
         if frame.empty:
             fig = px.scatter(x=[0], y=[0], title="No latent states yet")
             fig.update_layout(template="plotly_dark", uirevision="latent-atlas")
             return "", "", "No ticks yet.", fig, "No step selected.", ""
+
+        if run_filter:
+            frame = frame[frame["run_id"].isin(run_filter)]
+        if frame.empty:
+            fig = px.scatter(x=[0], y=[0], title="No runs selected")
+            fig.update_layout(template="plotly_dark", uirevision="latent-atlas")
+            return "", "", "No ticks for selected runs.", fig, "No step selected.", ""
 
         max_step = int(frame["step_idx"].max())
         selected_step = max(0, min(int(scrub_step if scrub_step is not None else max_step), max_step))
@@ -205,11 +306,19 @@ def create_dash_app(config: AppConfig) -> Dash:
             x="x",
             y="y",
             color="coherence",
-            symbol="phase",
+            symbol="run_label",
             custom_data=["step_idx"],
-            hover_data=["state_id", "basin", "step_idx", "preview", "committed", "density", "entropy"],
+            hover_data=["state_id", "run_label", "run_id", "basin", "step_idx", "preview", "committed", "density", "entropy"],
         )
-        fig.add_scatter(x=traj["x"], y=traj["y"], mode="lines", line={"width": 4, "color": "#FFFFFF"}, name="trajectory")
+        for run_id, run_traj in traj.groupby("run_id"):
+            fig.add_scatter(
+                x=run_traj["x"],
+                y=run_traj["y"],
+                mode="lines",
+                line={"width": 2},
+                name=f"trajectory {run_id[:8]}",
+                showlegend=False,
+            )
         if not selected.empty:
             fig.add_scatter(x=selected["x"], y=selected["y"], mode="markers", marker={"size": 16, "color": "#ff4d6d"}, name="selected")
         fig.update_layout(
@@ -219,13 +328,13 @@ def create_dash_app(config: AppConfig) -> Dash:
         )
 
         selected_txt = ""
-        step_info = f"Selected step: {selected_step} / {max_step}"
+        step_info = f"Selected step: {selected_step} / {max_step} | runs: {frame['run_id'].nunique()}"
         preview_text = ""
         committed_text = ""
         metrics = "No ticks yet."
         if not selected.empty:
             row = selected.iloc[0]
-            selected_txt = f"selected state={row['state_id']} phase={row['phase']} basin={row['basin']}"
+            selected_txt = f"selected state={row['state_id']} run={row['run_id'][:8]} phase={row['phase']} basin={row['basin']}"
             preview_text = str(row.get("preview") or "")
             committed_text = str(row.get("committed") or "")
             metrics = (
@@ -247,14 +356,6 @@ def create_dash_app(config: AppConfig) -> Dash:
             )
 
         return preview_text, committed_text, metrics, fig, step_info, selected_txt
-
-    @app.callback(Output("scrub-step", "max"), Input("ticker", "n_intervals"))
-    def refresh_scrub_max(_):
-        frame = controller.atlas.to_frame()
-        if frame.empty:
-            return 1
-        return int(frame["step_idx"].max())
-
     return app
 
 

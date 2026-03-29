@@ -56,6 +56,20 @@ class LatentAtlas:
             self.points.extend(new_points)
             self._rebuild_indexes_if_needed()
 
+    def clear(self) -> None:
+        with self._lock:
+            self.points = []
+            self.edges = []
+            self._rebuild_indexes()
+
+    def remove_runs(self, run_ids: set[str]) -> None:
+        if not run_ids:
+            return
+        with self._lock:
+            self.points = [p for p in self.points if p.run_id not in run_ids]
+            self.edges = [e for e in self.edges if e.run_id not in run_ids]
+            self._rebuild_indexes()
+
     def append_transition(self, edge: TransitionEdge) -> None:
         with self._lock:
             self.edges.append(edge)
