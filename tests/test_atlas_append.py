@@ -1,9 +1,9 @@
 import numpy as np
 
-from gguf_dream_lab.backend.atlas.atlas import LatentAtlas, StatePoint
+from gguf_dream_lab.backend.atlas.atlas import LatentAtlas, StatePoint, TransitionEdge
 
 
-def test_atlas_append_growth():
+def test_atlas_append_growth_and_edges():
     atlas = LatentAtlas()
     for i in range(5):
         atlas.append_points(
@@ -22,7 +22,10 @@ def test_atlas_append_growth():
                 )
             ]
         )
+        if i:
+            atlas.append_transition(TransitionEdge(f"s{i-1}", f"s{i}", "r", i, 0.2, 0.1, 1.0))
     assert len(atlas.points) == 5
+    assert len(atlas.edges) == 4
 
 
 def test_to_frame_tolerates_partial_cluster_labels():

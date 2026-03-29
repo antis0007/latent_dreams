@@ -12,8 +12,8 @@ class Basin(str, Enum):
     INTROSPECTIVE = "introspective"
     NARRATIVE = "narrative"
     MEMORY = "memory"
-    AFFECTIVE_STYLE = "affective_style"
-    CUSTOM = "custom"
+    AFFECTIVE = "affective"
+    PROMPT_CONDITIONED = "prompt_conditioned"
 
 
 class RuntimeConfig(BaseModel):
@@ -31,6 +31,8 @@ class RuntimeConfig(BaseModel):
     top_p: float = 0.95
     repeat_penalty: float = 1.05
     seed: int = 42
+    prefer_true_latent: bool = True
+    instrumented_backend: bool = False
 
 
 class CoherenceWeights(BaseModel):
@@ -53,6 +55,8 @@ class DreamConfig(BaseModel):
     max_preview_len: int = 220
     max_committed_len: int = 2000
     branch_count: int = 1
+    preview_decode_cadence: int = 1
+    stability_window: int = 4
     run_label: str = "default"
     weights: CoherenceWeights = Field(default_factory=CoherenceWeights)
 

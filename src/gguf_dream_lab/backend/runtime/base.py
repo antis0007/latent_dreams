@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import numpy as np
+
+from gguf_dream_lab.backend.dream.state import DreamMode, LatentState
 
 
 @dataclass
@@ -14,6 +16,8 @@ class RuntimeCapabilities:
     supports_instrumented_latents: bool
     backend_name: str
     warnings: list[str]
+    capture_sites: list[str] = field(default_factory=list)
+    active_mode: DreamMode = DreamMode.BASELINE_APPROXIMATE
 
 
 @dataclass
@@ -35,3 +39,11 @@ class RuntimeBackend(Protocol):
     def embed_text(self, text: str) -> np.ndarray | None: ...
 
     def benchmark(self, prompt: str, steps: int = 16) -> dict[str, Any]: ...
+
+    def capture_latent_state(self, run_id: str, basin: str, prompt: str) -> LatentState: ...
+
+    def evolve_latent_state(self, state: LatentState, target_vector: np.ndarray, noise_scale: float) -> LatentState: ...
+
+    def decode_preview_from_latent(self, state: LatentState, max_tokens: int = 16) -> str: ...
+
+    def decode_commit_from_latent(self, state: LatentState, max_tokens: int = 24) -> str: ...

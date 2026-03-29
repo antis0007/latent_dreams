@@ -7,3 +7,5 @@ def test_missing_model_path_fallback():
     step = backend.sample_step("test")
     assert step.token
     assert step.embedding is not None
+    latent = backend.capture_latent_state(run_id="r", basin="null_prior", prompt="test")
+    assert latent.latent_vector.size > 0

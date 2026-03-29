@@ -9,6 +9,12 @@ from typing import Any
 
 import numpy as np
 
+from gguf_dream_lab.backend.dream.state import DreamMode, LatentState
+from gguf_dream_lab.backend.instrumentation.adapters import (
+    ExperimentalLlamaForkAdapter,
+    InstrumentationAdapter,
+    LatentCapture,
+)
 from gguf_dream_lab.config.models import RuntimeConfig
 
 from .base import RuntimeBackend, RuntimeCapabilities, TokenStep
@@ -17,11 +23,12 @@ logger = logging.getLogger(__name__)
 
 
 class LlamaCppBackend(RuntimeBackend):
-    def __init__(self, config: RuntimeConfig):
+    def __init__(self, config: RuntimeConfig, instrumentation: InstrumentationAdapter | None = None):
         self.config = config
         self._llm = None
         self._loaded = False
         self._llama_error: str | None = None
+        self.instrumentation = instrumentation or ExperimentalLlamaForkAdapter(enabled=config.instrumented_backend)
 
     def load(self) -> None:
         if self._loaded:
@@ -61,13 +68,20 @@ class LlamaCppBackend(RuntimeBackend):
         warnings = []
         if self._llama_error:
             warnings.append(self._llama_error)
+        supports_true = self.instrumentation.available()
+        mode = DreamMode.TRUE_LATENT_INSTRUMENTED if supports_true else DreamMode.ENHANCED_LATENT
+        if not self.config.embedding:
+            mode = DreamMode.BASELINE_APPROXIMATE
+            warnings.append("Embeddings disabled; falling back to baseline approximate mode.")
         return RuntimeCapabilities(
-            supports_embeddings=True,
+            supports_embeddings=self.config.embedding,
             supports_logits_all=self.config.logits_all,
             supports_streaming=True,
-            supports_instrumented_latents=False,
+            supports_instrumented_latents=supports_true,
             backend_name="llama.cpp (via llama-cpp-python)" if self._llm else "synthetic-fallback",
             warnings=warnings,
+            capture_sites=self.instrumentation.capture_sites(),
+            active_mode=mode,
         )
 
     def sample_step(self, prompt: str, max_tokens: int = 16) -> TokenStep:
@@ -114,6 +128,40 @@ class LlamaCppBackend(RuntimeBackend):
         except Exception:
             return None
 
+    def capture_latent_state(self, run_id: str, basin: str, prompt: str) -> LatentState:
+        caps = self.capabilities()
+        mode = caps.active_mode
+        if caps.supports_instrumented_latents:
+            cap = self.instrumentation.capture()
+            if cap is not None:
+                return self._state_from_capture(run_id, basin, mode, cap)
+        vec = self.embed_text(prompt)
+        if vec is None:
+            vec = np.zeros(256, dtype=np.float32)
+        return LatentState(run_id=run_id, basin=basin, mode=mode, latent_vector=np.asarray(vec, dtype=np.float32))
+
+    def evolve_latent_state(self, state: LatentState, target_vector: np.ndarray, noise_scale: float) -> LatentState:
+        target = np.asarray(target_vector, dtype=np.float32)
+        if target.shape != state.latent_vector.shape:
+            target = np.resize(target, state.latent_vector.shape)
+        proposal = 0.7 * state.latent_vector + 0.3 * target
+        proposal = proposal + np.random.normal(scale=noise_scale, size=proposal.shape).astype(np.float32)
+        if state.mode == DreamMode.TRUE_LATENT_INSTRUMENTED:
+            injected = self.instrumentation.reinject(LatentCapture(layer=state.layer_id or 0, vector=proposal, metadata={}))
+            state.metadata["reinject_ok"] = injected
+        return state.clone_with_vector(proposal)
+
+    def decode_preview_from_latent(self, state: LatentState, max_tokens: int = 16) -> str:
+        hash_seed = abs(hash(state.latent_vector.tobytes()[:64])) % (2**32)
+        rng = np.random.default_rng(hash_seed)
+        lex = ["echo", "drift", "velvet", "signal", "memory", "city", "glass", "night"]
+        count = max(2, min(max_tokens, 10))
+        return " ".join(rng.choice(lex, size=count, replace=True).tolist())
+
+    def decode_commit_from_latent(self, state: LatentState, max_tokens: int = 24) -> str:
+        preview = self.decode_preview_from_latent(state, max_tokens=max_tokens)
+        return " ".join(preview.split()[: max(3, max_tokens // 2)])
+
     def benchmark(self, prompt: str, steps: int = 16) -> dict[str, Any]:
         self.load()
         started = time.perf_counter()
@@ -125,6 +173,7 @@ class LlamaCppBackend(RuntimeBackend):
             "elapsed_sec": elapsed,
             "steps_per_sec": steps / max(elapsed, 1e-9),
             "backend": self.capabilities().backend_name,
+            "active_mode": self.capabilities().active_mode.value,
         }
 
     def _synthetic_step(self, prompt: str) -> TokenStep:
@@ -135,3 +184,15 @@ class LlamaCppBackend(RuntimeBackend):
         top = [(random.choice(lex), float(np.log(max(p, 1e-9)))) for p in probs]
         emb = self.embed_text(f"{prompt} {token}")
         return TokenStep(token=token, logprob=float(np.log(float(max(probs)))), entropy=entropy, top_tokens=top, embedding=emb)
+
+    @staticmethod
+    def _state_from_capture(run_id: str, basin: str, mode: DreamMode, cap: LatentCapture) -> LatentState:
+        return LatentState(
+            run_id=run_id,
+            basin=basin,
+            mode=mode,
+            latent_vector=np.asarray(cap.vector, dtype=np.float32),
+            capture_site=f"layer_{cap.layer}",
+            layer_id=cap.layer,
+            metadata=dict(cap.metadata),
+        )

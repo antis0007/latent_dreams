@@ -8,8 +8,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from gguf_dream_lab.backend.atlas.atlas import LatentAtlas, StatePoint
+from gguf_dream_lab.backend.atlas.atlas import LatentAtlas, TransitionEdge
 from gguf_dream_lab.backend.dream.coherence import score_coherence
+from gguf_dream_lab.backend.dream.state import DreamMode, DreamPhase, LatentState
 from gguf_dream_lab.backend.runtime.base import RuntimeBackend
 from gguf_dream_lab.config.models import Basin, DreamConfig
 
@@ -18,8 +19,8 @@ SEED_BASIN_PREFIX = {
     Basin.INTROSPECTIVE: "I am inside a half-remembered thought where",
     Basin.NARRATIVE: "In a dimly lit scene,",
     Basin.MEMORY: "I remember something that almost happened:",
-    Basin.AFFECTIVE_STYLE: "A feeling arrives first, then",
-    Basin.CUSTOM: "",
+    Basin.AFFECTIVE: "A feeling arrives first, then",
+    Basin.PROMPT_CONDITIONED: "",
 }
 
 
@@ -35,6 +36,8 @@ class DreamTick:
     token_stability: float
     smoothness: float
     state_id: str
+    phase: str
+    mode: str
     status: str
 
 
@@ -56,6 +59,7 @@ class DreamController:
         self.runtime = runtime
         self.atlas = atlas
         self.state = DreamSessionState()
+        self.tick_history: list[DreamTick] = []
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
@@ -64,6 +68,7 @@ class DreamController:
         if self.state.active:
             return self.state
         self.state = DreamSessionState(active=True, paused=False, status="loading_model", status_detail="Loading model...")
+        self.tick_history = []
         self._stop_event.clear()
         self._pause_event.clear()
         self._thread = threading.Thread(target=self._loop, args=(cfg,), daemon=True)
@@ -97,97 +102,125 @@ class DreamController:
             return
 
         self.state.status = "running"
-        self.state.status_detail = ""
         period = 1.0 / max(cfg.tick_hz, 0.1)
-        preview_history: deque[str] = deque(maxlen=4)
-        prev_vec = None
+        preview_history: deque[str] = deque(maxlen=max(cfg.stability_window, 2))
         basin_prefix = SEED_BASIN_PREFIX[cfg.basin]
         prompt = (basin_prefix + " " + cfg.prompt).strip()
+        latent = self._seed_latent_state(cfg, prompt)
+        prev_vec = latent.latent_vector.copy()
         anneal = 1.0
 
         while not self._stop_event.is_set():
             if self._pause_event.is_set():
                 time.sleep(0.05)
                 continue
+
             tick_start = time.perf_counter()
-            try:
-                step = self.runtime.sample_step(prompt=prompt, max_tokens=12)
-            except Exception as exc:
-                self.state.status = "error"
-                self.state.status_detail = f"Runtime step failed: {exc}"
-                self._stop_event.set()
-                break
-            token = step.token.strip()
-            if token:
-                self.state.preview_text = self._merge_preview_token(self.state.preview_text, token, cfg.max_preview_len)
+            phase = self._phase_for_step(self.state.step_idx)
+            candidates = self._branch_candidates(latent, cfg, anneal, phase)
+            latent = self._choose_candidate(candidates)
+            preview = self.runtime.decode_preview_from_latent(latent, max_tokens=cfg.preview_decode_cadence * 4)
+            self.state.preview_text = preview[-cfg.max_preview_len :]
             preview_history.append(self.state.preview_text)
             token_stability = self._token_stability(preview_history)
-            vec = self._normalize_embedding(step.embedding, fallback=prev_vec)
-            if prev_vec is None:
-                smoothness = 0.5
-            else:
-                cos = float(np.dot(vec, prev_vec) / (np.linalg.norm(vec) * np.linalg.norm(prev_vec) + 1e-9))
-                smoothness = float((cos + 1.0) / 2.0)
-            prev_vec = vec
 
-            local_density = self._estimate_local_density(vec)
-            coherence = score_coherence(
-                entropy=step.entropy,
+            local_density = self._estimate_local_density(latent.latent_vector)
+            smoothness = self._smoothness(prev_vec, latent.latent_vector)
+            prev_vec = latent.latent_vector.copy()
+            latent.density = local_density
+            latent.entropy = max(0.01, 1.0 - min(local_density / 4.0, 0.9))
+            latent.coherence = score_coherence(
+                entropy=latent.entropy,
                 local_density=local_density,
                 token_stability=token_stability,
                 smoothness=smoothness,
-                branch_agreement=1.0,
+                branch_agreement=latent.metadata.get("branch_agreement", 1.0),
                 known_state_similarity=min(local_density / 5.0, 1.0),
                 weights=cfg.weights,
             )
+            latent.preview_text = self.state.preview_text
+            latent.committed_prefix = self.state.committed_text
 
-            if coherence >= cfg.coherence_threshold:
-                if self.state.preview_text:
-                    committed_addition = self.state.preview_text.split(" ")[-1]
-                    self.state.committed_text = self._merge_committed_token(
-                        self.state.committed_text,
-                        committed_addition,
-                        cfg.max_committed_len,
-                    )
-            prompt = self._evolve_prompt(base_prompt=(basin_prefix + " " + cfg.prompt).strip(), cfg=cfg)
+            if self._should_commit(latent.coherence, preview_history, cfg):
+                committed_chunk = self.runtime.decode_commit_from_latent(latent, max_tokens=12)
+                self.state.committed_text = self._merge_committed_chunk(self.state.committed_text, committed_chunk, cfg.max_committed_len)
+                latent.committed_prefix = self.state.committed_text
 
-            state_id = str(uuid.uuid4())
-            self.atlas.append_points(
-                [
-                    StatePoint(
-                        state_id=state_id,
+            point = self.atlas.append_latent_state(latent, run_label=cfg.run_label, step_idx=self.state.step_idx)
+            if len(self.atlas.points) > 1:
+                prev = self.atlas.points[-2]
+                dist = float(np.linalg.norm(point.embedding - prev.embedding))
+                self.atlas.append_transition(
+                    TransitionEdge(
+                        src_state_id=prev.state_id,
+                        dst_state_id=point.state_id,
                         run_id=self.state.run_id,
-                        run_label=cfg.run_label,
-                        basin=cfg.basin.value,
                         step_idx=self.state.step_idx,
-                        preview=self.state.preview_text,
-                        committed=self.state.committed_text,
-                        coherence=coherence,
-                        entropy=step.entropy,
-                        embedding=(vec + np.random.normal(scale=cfg.noise_amplitude * anneal, size=vec.shape)).astype(np.float32),
+                        distance=dist,
+                        curvature=abs(1.0 - smoothness),
+                        speed=dist * cfg.tick_hz,
                     )
-                ]
-            )
+                )
 
-            self.state.latest_tick = DreamTick(
+            tick = DreamTick(
                 run_id=self.state.run_id,
                 step_idx=self.state.step_idx,
                 preview_text=self.state.preview_text,
                 committed_text=self.state.committed_text,
-                coherence=coherence,
-                entropy=step.entropy,
+                coherence=latent.coherence,
+                entropy=latent.entropy,
                 local_density=local_density,
                 token_stability=token_stability,
                 smoothness=smoothness,
-                state_id=state_id,
+                state_id=latent.state_id,
+                phase=phase.value,
+                mode=latent.mode.value,
                 status=self.state.status,
             )
+            self.state.latest_tick = tick
+            self.tick_history.append(tick)
             self.state.step_idx += 1
             anneal *= cfg.anneal_rate
             elapsed = time.perf_counter() - tick_start
             time.sleep(max(period - elapsed, 0.0))
 
         self.state.active = False
+
+    def _seed_latent_state(self, cfg: DreamConfig, prompt: str) -> LatentState:
+        basin_vec = self.atlas.sample_seed_from_basin(cfg.basin.value)
+        latent = self.runtime.capture_latent_state(self.state.run_id, cfg.basin.value, prompt)
+        if basin_vec is not None:
+            blended = 0.65 * basin_vec + 0.35 * latent.latent_vector
+            latent = latent.clone_with_vector(blended, phase=DreamPhase.HYPNAGOGIC)
+        latent.metadata["prompt_seed"] = prompt
+        return latent
+
+    def _branch_candidates(self, latent: LatentState, cfg: DreamConfig, anneal: float, phase: DreamPhase) -> list[LatentState]:
+        neighbors = self._neighbor_vector(latent.latent_vector)
+        candidates = []
+        for _ in range(max(cfg.branch_count, 1)):
+            target = 0.7 * neighbors + 0.3 * latent.latent_vector
+            proposal = self.runtime.evolve_latent_state(latent, target_vector=target, noise_scale=cfg.noise_amplitude * anneal)
+            proposal.phase = phase
+            proposal.metadata["branch_agreement"] = 1.0 if cfg.branch_count == 1 else 1.0 - (cfg.noise_amplitude * anneal * 0.25)
+            candidates.append(proposal)
+        return candidates
+
+    def _choose_candidate(self, candidates: list[LatentState]) -> LatentState:
+        if len(candidates) == 1:
+            return candidates[0]
+        scores = [float(np.linalg.norm(c.latent_vector)) for c in candidates]
+        return candidates[int(np.argmax(scores))]
+
+    def _neighbor_vector(self, current: np.ndarray) -> np.ndarray:
+        if not self.atlas.points:
+            return current
+        idx = len(self.atlas.points) - 1
+        nn_idx = self.atlas.neighbors(idx, k=4)
+        if not nn_idx:
+            return current
+        vecs = [self.atlas.points[i].embedding for i in nn_idx]
+        return np.mean(np.stack(vecs, axis=0), axis=0)
 
     def _estimate_local_density(self, vec: np.ndarray) -> float:
         if not self.atlas.points:
@@ -199,52 +232,42 @@ class DreamController:
         top = np.sort(dists)[: min(8, len(dists))]
         return float(1.0 / (np.mean(top) + 1e-6))
 
-    def _normalize_embedding(self, embedding: np.ndarray | None, fallback: np.ndarray | None = None) -> np.ndarray:
-        if embedding is not None:
-            vec = np.asarray(embedding, dtype=np.float32)
-            if vec.ndim > 1:
-                vec = vec.mean(axis=0)
-            if vec.ndim == 1 and vec.size:
-                return vec
+    @staticmethod
+    def _smoothness(prev: np.ndarray, cur: np.ndarray) -> float:
+        cos = float(np.dot(cur, prev) / (np.linalg.norm(cur) * np.linalg.norm(prev) + 1e-9))
+        return float((cos + 1.0) / 2.0)
 
-        if fallback is not None:
-            return np.zeros_like(fallback, dtype=np.float32)
-        if self.atlas.points:
-            return np.zeros_like(self.atlas.points[-1].embedding, dtype=np.float32)
-        return np.zeros(256, dtype=np.float32)
+    @staticmethod
+    def _phase_for_step(step_idx: int) -> DreamPhase:
+        stage = step_idx % 24
+        if stage < 6:
+            return DreamPhase.HYPNAGOGIC
+        if stage < 13:
+            return DreamPhase.SCENE_FORMATION
+        if stage < 20:
+            return DreamPhase.CONSOLIDATION
+        return DreamPhase.DRIFT_RESET
 
     @staticmethod
     def _token_stability(history: deque[str]) -> float:
         if len(history) < 2:
             return 0.0
-        tail_words = [h.split(" ")[-1] if h else "" for h in history]
-        counts = {w: tail_words.count(w) for w in set(tail_words)}
-        return max(counts.values()) / len(tail_words)
+        tails = [" ".join(h.split()[-3:]) for h in history]
+        counts = {w: tails.count(w) for w in set(tails)}
+        return max(counts.values()) / len(tails)
 
     @staticmethod
-    def _merge_preview_token(current_preview: str, token: str, max_len: int) -> str:
-        """Mutate the preview by replacing repeated tails instead of endlessly appending."""
-        words = current_preview.split()
-        if words and words[-1] == token:
-            return current_preview[-max_len:]
-        if len(words) >= 2 and words[-1] == words[-2] and words[-1] != token:
-            words[-1] = token
-            updated = " ".join(words)
-        else:
-            updated = " ".join([*words, token]) if words else token
+    def _should_commit(coherence: float, history: deque[str], cfg: DreamConfig) -> bool:
+        if coherence < cfg.coherence_threshold or len(history) < cfg.stability_window:
+            return False
+        last = list(history)[-cfg.stability_window :]
+        unique = len(set(last))
+        return unique <= max(2, cfg.stability_window // 2)
+
+    @staticmethod
+    def _merge_committed_chunk(current_committed: str, chunk: str, max_len: int) -> str:
+        chunk = chunk.strip()
+        if not chunk:
+            return current_committed
+        updated = (current_committed + " " + chunk).strip()
         return updated[-max_len:]
-
-    @staticmethod
-    def _merge_committed_token(current_committed: str, token: str, max_len: int) -> str:
-        words = current_committed.split()
-        if words and words[-1] == token:
-            return current_committed[:max_len]
-        updated = " ".join([*words, token]) if words else token
-        return updated[:max_len]
-
-    def _evolve_prompt(self, base_prompt: str, cfg: DreamConfig) -> str:
-        """Use recent committed/preview context to avoid sampling from a static prompt."""
-        committed_tail = " ".join(self.state.committed_text.split()[-24:])
-        preview_tail = " ".join(self.state.preview_text.split()[-12:])
-        parts = [part for part in (base_prompt, committed_tail, preview_tail) if part]
-        return " ".join(parts)[-max(cfg.max_preview_len * 2, 256) :]

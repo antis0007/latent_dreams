@@ -1,8 +1,7 @@
 # Limitations
 
-- Baseline latent-state geometry is approximate, not full hidden-state introspection.
-- `llama-cpp-python` capabilities vary across versions and model metadata.
-- Without GPU offload, performance may degrade on consumer CPUs.
-- Coherence score is heuristic and should be tuned per model family.
-- Current projection is PCA-first; UMAP can be added optionally.
-- Branch dreaming is scaffolded via score inputs but not fully parallelized in MVP.
+- `true_latent_instrumented` currently depends on a custom instrumentation adapter/fork.
+- The provided instrumented adapter is a scaffold/stub, not a production tensor hook.
+- Projection plots are for inspection only; control remains in high-dimensional latent vectors.
+- Synthetic fallback mode is deterministic-ish for testing and UI demo, not model-faithful dreaming.
+- Consumer hardware constraints may require lowering `tick_hz`, branch count, and decode cadence.
