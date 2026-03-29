@@ -62,6 +62,13 @@ def test_stubbed_instrumentation_does_not_promote_true_mode():
                 source="instrumented_stub",
                 capture_site_ids=["layer_16"],
                 tensor_shape_metadata={"ndim": 1, "size": 256},
+                verification_metadata={
+                    "backend_variant": "llama.cpp.experimental.stub",
+                    "instrumentation_commit": "",
+                    "capture_api": "latent_capture_v0",
+                    "tensor_dtype": "float32",
+                },
+                downgrade_reasons=["instrumented_stub_capture", "missing_verification_metadata:instrumentation_commit"],
                 warning=(
                     "Instrumentation verification failed: source=instrumented_stub; "
                     "backend evidence is synthetic and true mode promotion is disabled."
@@ -85,6 +92,7 @@ def test_stubbed_instrumentation_does_not_promote_true_mode():
     assert caps.active_mode.value == "enhanced_latent"
     assert "layer_16" in caps.capture_sites
     assert any("source=instrumented_stub" in warning for warning in caps.warnings)
+    assert "instrumented_stub_capture" in caps.instrumentation_downgrade_reasons
 
 
 def test_decode_commit_from_latent_sets_approx_preview_source_and_avoids_preview_truncation():

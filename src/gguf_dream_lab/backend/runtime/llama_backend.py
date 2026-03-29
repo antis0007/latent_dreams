@@ -94,9 +94,17 @@ class LlamaCppBackend(RuntimeBackend):
         if self._llama_error:
             warnings.append(self._llama_error)
         verification: InstrumentationVerification = self.instrumentation.verify_backend_evidence()
+        verification_reasons = list(verification.downgrade_reasons)
         supports_true = self.instrumentation.available() and verification.verified
+        if self.instrumentation.available() and not verification.verified and not verification_reasons:
+            verification_reasons.append("instrumentation_verification_failed")
         if verification.warning:
             warnings.append(verification.warning)
+        if verification_reasons:
+            warnings.append(
+                "True latent mode downgraded: "
+                f"source={verification.source}; reasons={verification_reasons}"
+            )
         claimed_mode = DreamMode.TRUE_LATENT_INSTRUMENTED if supports_true else DreamMode.ENHANCED_LATENT
         if not self.config.embedding:
             claimed_mode = DreamMode.BASELINE_APPROXIMATE
@@ -130,6 +138,9 @@ class LlamaCppBackend(RuntimeBackend):
             supports_reinject=behaviors.reinject,
             supports_decode_provenance=behaviors.decode_provenance,
             supports_control_authority=behaviors.control_authority,
+            instrumentation_verification_source=verification.source,
+            instrumentation_verification_metadata=dict(verification.verification_metadata),
+            instrumentation_downgrade_reasons=verification_reasons,
         )
 
     def sample_step(self, prompt: str, max_tokens: int = 16) -> TokenStep:

@@ -23,6 +23,9 @@ class RuntimeCapabilities:
     supports_reinject: bool = False
     supports_decode_provenance: bool = False
     supports_control_authority: bool = False
+    instrumentation_verification_source: str = "unverified"
+    instrumentation_verification_metadata: dict[str, str] = field(default_factory=dict)
+    instrumentation_downgrade_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass

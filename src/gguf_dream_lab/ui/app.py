@@ -334,6 +334,12 @@ def create_dash_app(config: AppConfig) -> Dash:
         suffix = ""
         if contract.downgraded:
             suffix = f" | contract_downgrade_missing={contract.missing_behaviors}"
+        verification_suffix = ""
+        if caps.instrumentation_downgrade_reasons:
+            verification_suffix = (
+                f" | verification_source={caps.instrumentation_verification_source}"
+                f" | verification_downgrade_reasons={caps.instrumentation_downgrade_reasons}"
+            )
         decode_lane = (
             "true_latent_readout"
             if caps.supports_instrumented_latents and caps.supports_true_latent_readout
@@ -343,6 +349,7 @@ def create_dash_app(config: AppConfig) -> Dash:
             f"Mode: {contract.effective_mode.value} | backend: {caps.backend_name} "
             f"| behaviors=capture:{caps.supports_capture},reinject:{caps.supports_reinject},"
             f"decode_provenance:{caps.supports_decode_provenance},control_authority:{caps.supports_control_authority} "
+            f"| capture_sites: {caps.capture_sites or ['none']}{suffix}{verification_suffix}"
             f"| decode_lane:{decode_lane} | capture_sites: {caps.capture_sites or ['none']}{suffix}"
         )
 
