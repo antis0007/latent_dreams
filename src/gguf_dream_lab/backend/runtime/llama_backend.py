@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from gguf_dream_lab.backend.dream.state import DreamMode, LatentState
+from gguf_dream_lab.backend.dream.state import DreamMode, LatentSource, LatentState
 from gguf_dream_lab.backend.instrumentation.adapters import (
     ExperimentalLlamaForkAdapter,
     InstrumentationAdapter,
@@ -164,17 +164,40 @@ class LlamaCppBackend(RuntimeBackend):
             cap = self.instrumentation.capture()
             if cap is not None:
                 return self._state_from_capture(run_id, basin, mode, cap)
+            return LatentState(
+                run_id=run_id,
+                basin=basin,
+                mode=mode,
+                latent_vector=np.zeros(256, dtype=np.float32),
+                latent_source=LatentSource.STUB_CAPTURE,
+                capture_site="instrumentation_stub",
+            )
         vec = self.embed_text(prompt)
         if vec is None:
             vec = np.zeros(256, dtype=np.float32)
-        return LatentState(run_id=run_id, basin=basin, mode=mode, latent_vector=np.asarray(vec, dtype=np.float32))
+        return LatentState(
+            run_id=run_id,
+            basin=basin,
+            mode=mode,
+            latent_vector=np.asarray(vec, dtype=np.float32),
+            latent_source=LatentSource.EMBEDDING_PROXY,
+            capture_site=LatentSource.EMBEDDING_PROXY.value,
+        )
 
-    def evolve_latent_state(self, state: LatentState, target_vector: np.ndarray, noise_scale: float) -> LatentState:
+    def evolve_latent_state(
+        self,
+        state: LatentState,
+        target_vector: np.ndarray,
+        noise_scale: float,
+        *,
+        noise_seed: int | None = None,
+    ) -> LatentState:
         target = np.asarray(target_vector, dtype=np.float32)
         if target.shape != state.latent_vector.shape:
             target = np.resize(target, state.latent_vector.shape)
         proposal = 0.7 * state.latent_vector + 0.3 * target
-        proposal = proposal + np.random.normal(scale=noise_scale, size=proposal.shape).astype(np.float32)
+        rng = np.random.default_rng(noise_seed)
+        proposal = proposal + rng.normal(scale=noise_scale, size=proposal.shape).astype(np.float32)
         if state.mode == DreamMode.TRUE_LATENT_INSTRUMENTED:
             injected = self.instrumentation.reinject(LatentCapture(layer=state.layer_id or 0, vector=proposal, metadata={}))
             state.metadata["reinject_ok"] = injected
@@ -325,6 +348,7 @@ class LlamaCppBackend(RuntimeBackend):
             mode=mode,
             latent_vector=np.asarray(cap.vector, dtype=np.float32),
             capture_site=f"layer_{cap.layer}",
+            latent_source=LatentSource.TRUE_TENSOR_CAPTURE,
             layer_id=cap.layer,
             metadata=dict(cap.metadata),
         )

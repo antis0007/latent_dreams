@@ -315,7 +315,7 @@ def create_dash_app(config: AppConfig) -> Dash:
             color="coherence",
             symbol="run_label",
             custom_data=["step_idx"],
-            hover_data=["state_id", "run_label", "run_id", "basin", "step_idx", "preview", "committed", "density", "entropy"],
+            hover_data=["state_id", "run_label", "run_id", "basin", "step_idx", "latent_source", "preview", "committed", "density", "entropy"],
         )
         for run_id, run_traj in traj.groupby("run_id"):
             fig.add_scatter(
@@ -341,13 +341,17 @@ def create_dash_app(config: AppConfig) -> Dash:
         metrics = "No ticks yet."
         if not selected.empty:
             row = selected.iloc[0]
-            selected_txt = f"selected state={row['state_id']} run={row['run_id'][:8]} phase={row['phase']} basin={row['basin']}"
+            selected_txt = (
+                f"selected state={row['state_id']} run={row['run_id'][:8]} "
+                f"phase={row['phase']} basin={row['basin']} latent_source={row.get('latent_source', 'unknown')}"
+            )
             preview_text = str(row.get("preview") or "")
             committed_text = str(row.get("committed") or "")
             metrics = (
                 f"mode={tick.mode if tick else 'unknown'}\n"
                 f"phase={row['phase']}\n"
                 f"commit_source={tick.commit_source if tick else 'unknown'}\n"
+                f"latent_source={row.get('latent_source', 'unknown')}\n"
                 f"coherence={float(row['coherence']):.3f}\n"
                 f"entropy={float(row['entropy']):.3f}\n"
                 f"density={float(row['density']):.3f}"
@@ -358,6 +362,7 @@ def create_dash_app(config: AppConfig) -> Dash:
                 f"mode={tick.mode}\n"
                 f"phase={tick.phase}\n"
                 f"commit_source={tick.commit_source}\n"
+                f"latent_source={tick.latent_source}\n"
                 f"coherence={tick.coherence:.3f}\n"
                 f"entropy={tick.entropy:.3f}\n"
                 f"density={tick.local_density:.3f}\n"
