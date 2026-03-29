@@ -119,7 +119,7 @@ class DreamController:
                 break
             token = step.token.strip()
             if token:
-                self.state.preview_text = (self.state.preview_text + " " + token).strip()[-cfg.max_preview_len :]
+                self.state.preview_text = self._merge_preview_token(self.state.preview_text, token, cfg.max_preview_len)
             preview_history.append(self.state.preview_text)
             token_stability = self._token_stability(preview_history)
             vec = self._normalize_embedding(step.embedding, fallback=prev_vec)
@@ -144,7 +144,12 @@ class DreamController:
             if coherence >= cfg.coherence_threshold:
                 if self.state.preview_text:
                     committed_addition = self.state.preview_text.split(" ")[-1]
-                    self.state.committed_text = (self.state.committed_text + " " + committed_addition).strip()[: cfg.max_committed_len]
+                    self.state.committed_text = self._merge_committed_token(
+                        self.state.committed_text,
+                        committed_addition,
+                        cfg.max_committed_len,
+                    )
+            prompt = self._evolve_prompt(base_prompt=(basin_prefix + " " + cfg.prompt).strip(), cfg=cfg)
 
             state_id = str(uuid.uuid4())
             self.atlas.append_points(
@@ -215,3 +220,31 @@ class DreamController:
         tail_words = [h.split(" ")[-1] if h else "" for h in history]
         counts = {w: tail_words.count(w) for w in set(tail_words)}
         return max(counts.values()) / len(tail_words)
+
+    @staticmethod
+    def _merge_preview_token(current_preview: str, token: str, max_len: int) -> str:
+        """Mutate the preview by replacing repeated tails instead of endlessly appending."""
+        words = current_preview.split()
+        if words and words[-1] == token:
+            return current_preview[-max_len:]
+        if len(words) >= 2 and words[-1] == words[-2] and words[-1] != token:
+            words[-1] = token
+            updated = " ".join(words)
+        else:
+            updated = " ".join([*words, token]) if words else token
+        return updated[-max_len:]
+
+    @staticmethod
+    def _merge_committed_token(current_committed: str, token: str, max_len: int) -> str:
+        words = current_committed.split()
+        if words and words[-1] == token:
+            return current_committed[:max_len]
+        updated = " ".join([*words, token]) if words else token
+        return updated[:max_len]
+
+    def _evolve_prompt(self, base_prompt: str, cfg: DreamConfig) -> str:
+        """Use recent committed/preview context to avoid sampling from a static prompt."""
+        committed_tail = " ".join(self.state.committed_text.split()[-24:])
+        preview_tail = " ".join(self.state.preview_text.split()[-12:])
+        parts = [part for part in (base_prompt, committed_tail, preview_tail) if part]
+        return " ".join(parts)[-max(cfg.max_preview_len * 2, 256) :]
