@@ -156,7 +156,7 @@ class DreamController:
                 committed_chunk = self.runtime.decode_commit_from_latent(latent, max_tokens=24)
                 self.state.committed_text = self._merge_committed_chunk(self.state.committed_text, committed_chunk, cfg.max_committed_len)
                 latent.committed_prefix = self.state.committed_text
-                commit_decode_source = "decode_commit_from_latent"
+                commit_decode_source = str(latent.metadata.get("commit_source", "decode_commit_from_latent"))
             else:
                 commit_decode_source = "none"
 
@@ -215,10 +215,9 @@ class DreamController:
         self.state.active = False
 
     def _decode_preview(self, latent: LatentState, max_tokens: int) -> str:
-        caps = self.runtime.capabilities()
-        if caps.supports_instrumented_latents and caps.supports_true_latent_readout:
+        if self._decode_capability_level() == "true_latent_readout":
             return self.runtime.decode_true_latent_readout_preview(latent, max_tokens=max_tokens)
-        return self.runtime.decode_prompt_conditioned_preview_from_latent(latent, max_tokens=max_tokens)
+        return self.runtime.decode_approximate_prompt_synthesis_preview(latent, max_tokens=max_tokens)
 
     def _seed_latent_state(self, cfg: DreamConfig, prompt: str) -> LatentState:
         basin_vec = self.atlas.sample_seed_from_basin(cfg.basin.value)
@@ -306,10 +305,17 @@ class DreamController:
         return selected
 
     def _preview_decode_source(self) -> str:
+        if self._decode_capability_level() == "true_latent_readout":
+            return "decode_true_latent_readout_preview"
+        return "decode_approximate_prompt_synthesis_preview"
+
+    def _decode_capability_level(self) -> str:
         caps = self.runtime.capabilities()
         if caps.supports_instrumented_latents and caps.supports_true_latent_readout:
-            return "decode_true_latent_readout_preview"
-        return "decode_prompt_conditioned_preview_from_latent"
+            return "true_latent_readout"
+        if caps.supports_instrumented_latents:
+            return "instrumented_capture_only"
+        return "approximate_prompt_synthesis_only"
 
     def _distance_to_attractor(self, vec: np.ndarray, *, basin: str) -> float:
         attractors = self.atlas.candidate_attractors(basin=basin, top_k=5)

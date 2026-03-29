@@ -89,7 +89,7 @@ def test_stubbed_instrumentation_does_not_promote_true_mode():
 
 def test_decode_commit_from_latent_sets_approx_preview_source_and_avoids_preview_truncation():
     class BackendWithoutPreviewPath(LlamaCppBackend):
-        def decode_prompt_conditioned_preview_from_latent(self, state: LatentState, max_tokens: int = 16) -> str:
+        def decode_approximate_prompt_synthesis_preview(self, state: LatentState, max_tokens: int = 16) -> str:
             raise AssertionError("commit synthesis should not call preview decode path")
 
     backend = BackendWithoutPreviewPath(RuntimeConfig(model_path=None))
@@ -103,7 +103,7 @@ def test_decode_commit_from_latent_sets_approx_preview_source_and_avoids_preview
     committed = backend.decode_commit_from_latent(state, max_tokens=16)
 
     assert committed
-    assert state.metadata["commit_source"] == "approx_preview"
+    assert state.metadata["commit_source"] == "approximate_prompt_synthesis"
 
 
 def test_decode_commit_from_latent_uses_true_decode_source_when_capability_is_available():

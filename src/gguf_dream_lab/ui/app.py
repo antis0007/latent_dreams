@@ -334,11 +334,16 @@ def create_dash_app(config: AppConfig) -> Dash:
         suffix = ""
         if contract.downgraded:
             suffix = f" | contract_downgrade_missing={contract.missing_behaviors}"
+        decode_lane = (
+            "true_latent_readout"
+            if caps.supports_instrumented_latents and caps.supports_true_latent_readout
+            else "approximate_prompt_synthesis"
+        )
         return (
             f"Mode: {contract.effective_mode.value} | backend: {caps.backend_name} "
             f"| behaviors=capture:{caps.supports_capture},reinject:{caps.supports_reinject},"
             f"decode_provenance:{caps.supports_decode_provenance},control_authority:{caps.supports_control_authority} "
-            f"| capture_sites: {caps.capture_sites or ['none']}{suffix}"
+            f"| decode_lane:{decode_lane} | capture_sites: {caps.capture_sites or ['none']}{suffix}"
         )
 
     @app.callback(Output("preview-title", "children"), Input("ticker", "n_intervals"))
@@ -346,7 +351,7 @@ def create_dash_app(config: AppConfig) -> Dash:
         caps = runtime.capabilities()
         if caps.supports_instrumented_latents and caps.supports_true_latent_readout:
             return "Preview (true latent readout)"
-        return "Preview (prompt-conditioned approximation)"
+        return "Preview (approximate prompt synthesis)"
 
     @app.callback(
         Output("scrub-step", "value"),
@@ -480,7 +485,7 @@ def create_dash_app(config: AppConfig) -> Dash:
                     f"branch_id={replay_row.get('branch_id', '')}\n"
                     f"branch_score={float(replay_row.get('branch_score', 0.0)):.3f}\n"
                     f"candidate_scores={replay_row.get('candidate_scores', '[]')}\n"
-                    f"decode_provenance={replay_row.get('decode_provenance', 'unknown')}"
+                    f"decode_path_diagnostics={replay_row.get('decode_provenance', 'unknown')}"
                 )
 
         return preview_text, committed_text, metrics, fig, step_info, selected_txt
