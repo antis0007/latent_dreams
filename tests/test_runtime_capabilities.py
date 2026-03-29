@@ -2,6 +2,12 @@ import sys
 import time
 import types
 
+import numpy as np
+
+from gguf_dream_lab.backend.instrumentation.adapters import (
+    InstrumentationVerification,
+    LatentCapture,
+)
 from gguf_dream_lab.backend.runtime.llama_backend import LlamaCppBackend
 from gguf_dream_lab.config.models import RuntimeConfig
 
@@ -41,3 +47,39 @@ def test_runtime_load_timeout_falls_back_to_synthetic(tmp_path):
     assert backend._llm is None
     assert caps.backend_name == "synthetic-fallback"
     assert any("timed out" in warning for warning in caps.warnings)
+
+
+def test_stubbed_instrumentation_does_not_promote_true_mode():
+    class StubbedAdapter:
+        def available(self) -> bool:
+            return True
+
+        def verify_backend_evidence(self) -> InstrumentationVerification:
+            return InstrumentationVerification(
+                verified=False,
+                source="instrumented_stub",
+                capture_site_ids=["layer_16"],
+                tensor_shape_metadata={"ndim": 1, "size": 256},
+                warning=(
+                    "Instrumentation verification failed: source=instrumented_stub; "
+                    "backend evidence is synthetic and true mode promotion is disabled."
+                ),
+            )
+
+        def capture_sites(self) -> list[str]:
+            return ["post_attn_l16"]
+
+        def capture(self, layer: int | None = None) -> LatentCapture | None:
+            del layer
+            return LatentCapture(layer=16, vector=np.ones(256, dtype=np.float32), metadata={"source": "instrumented_stub"})
+
+        def reinject(self, capture: LatentCapture) -> bool:
+            return bool(capture.vector.size)
+
+    backend = LlamaCppBackend(RuntimeConfig(model_path=None, instrumented_backend=True), instrumentation=StubbedAdapter())
+    caps = backend.capabilities()
+
+    assert not caps.supports_instrumented_latents
+    assert caps.active_mode.value == "enhanced_latent"
+    assert "layer_16" in caps.capture_sites
+    assert any("source=instrumented_stub" in warning for warning in caps.warnings)
