@@ -122,7 +122,7 @@ class DreamController:
                 self.state.preview_text = (self.state.preview_text + " " + token).strip()[-cfg.max_preview_len :]
             preview_history.append(self.state.preview_text)
             token_stability = self._token_stability(preview_history)
-            vec = step.embedding if step.embedding is not None else np.zeros(256, dtype=np.float32)
+            vec = self._normalize_embedding(step.embedding, fallback=prev_vec)
             if prev_vec is None:
                 smoothness = 0.5
             else:
@@ -188,9 +188,25 @@ class DreamController:
         if not self.atlas.points:
             return 0.0
         mat = np.stack([p.embedding for p in self.atlas.points], axis=0)
+        if mat.shape[1] != vec.shape[0]:
+            return 0.0
         dists = np.linalg.norm(mat - vec.reshape(1, -1), axis=1)
         top = np.sort(dists)[: min(8, len(dists))]
         return float(1.0 / (np.mean(top) + 1e-6))
+
+    def _normalize_embedding(self, embedding: np.ndarray | None, fallback: np.ndarray | None = None) -> np.ndarray:
+        if embedding is not None:
+            vec = np.asarray(embedding, dtype=np.float32)
+            if vec.ndim > 1:
+                vec = vec.mean(axis=0)
+            if vec.ndim == 1 and vec.size:
+                return vec
+
+        if fallback is not None:
+            return np.zeros_like(fallback, dtype=np.float32)
+        if self.atlas.points:
+            return np.zeros_like(self.atlas.points[-1].embedding, dtype=np.float32)
+        return np.zeros(256, dtype=np.float32)
 
     @staticmethod
     def _token_stability(history: deque[str]) -> float:
