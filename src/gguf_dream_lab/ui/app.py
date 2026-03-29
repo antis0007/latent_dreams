@@ -8,6 +8,7 @@ from dash import Dash, Input, Output, State, ctx, dcc, html
 
 from gguf_dream_lab.backend.atlas.atlas import AtlasStorage
 from gguf_dream_lab.backend.dream.controller import DreamController
+from gguf_dream_lab.backend.runtime.capability_contracts import RuntimeBehaviorSnapshot, validate_mode_contract
 from gguf_dream_lab.backend.runtime.llama_backend import LlamaCppBackend
 from gguf_dream_lab.config.models import AppConfig, Basin
 from gguf_dream_lab.storage.session_store import SessionStore
@@ -249,7 +250,22 @@ def create_dash_app(config: AppConfig) -> Dash:
     @app.callback(Output("capability", "children"), Input("ticker", "n_intervals"))
     def refresh_capability(_):
         caps = runtime.capabilities()
-        return f"Mode: {caps.active_mode.value} | backend: {caps.backend_name} | capture_sites: {caps.capture_sites or ['none']}"
+        behavior_snapshot = RuntimeBehaviorSnapshot(
+            capture=caps.supports_capture,
+            reinject=caps.supports_reinject,
+            decode_provenance=caps.supports_decode_provenance,
+            control_authority=caps.supports_control_authority,
+        )
+        contract = validate_mode_contract(caps.active_mode, behavior_snapshot)
+        suffix = ""
+        if contract.downgraded:
+            suffix = f" | contract_downgrade_missing={contract.missing_behaviors}"
+        return (
+            f"Mode: {contract.effective_mode.value} | backend: {caps.backend_name} "
+            f"| behaviors=capture:{caps.supports_capture},reinject:{caps.supports_reinject},"
+            f"decode_provenance:{caps.supports_decode_provenance},control_authority:{caps.supports_control_authority} "
+            f"| capture_sites: {caps.capture_sites or ['none']}{suffix}"
+        )
 
     @app.callback(Output("preview-title", "children"), Input("ticker", "n_intervals"))
     def refresh_preview_title(_):
