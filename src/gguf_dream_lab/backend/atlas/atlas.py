@@ -79,8 +79,10 @@ class LatentAtlas:
         return point
 
     def _rebuild_indexes_if_needed(self) -> None:
-        if len(self.points) < 3 or len(self.points) % 8 == 0:
-            self._rebuild_indexes()
+        # Keep projection and neighbor index in sync on every append so the UI
+        # never renders newly added points as (0, 0) placeholders between
+        # periodic rebuild windows.
+        self._rebuild_indexes()
 
     def _rebuild_indexes(self) -> None:
         if not self.points:
@@ -113,7 +115,7 @@ class LatentAtlas:
             if neighbor_count <= 0:
                 return []
             _, indices = self.nn.kneighbors(query, n_neighbors=neighbor_count)
-            return [int(i) for i in indices[0].tolist() if i < len(self.points)]
+            return [int(i) for i in indices[0].tolist() if i < len(self.points) and int(i) != index]
 
     def local_density(self, index: int, k: int = 6) -> float:
         with self._lock:

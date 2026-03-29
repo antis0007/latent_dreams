@@ -119,7 +119,7 @@ class DreamController:
             phase = self._phase_for_step(self.state.step_idx)
             candidates = self._branch_candidates(latent, cfg, anneal, phase)
             latent = self._choose_candidate(candidates)
-            preview = self.runtime.decode_preview_from_latent(latent, max_tokens=cfg.preview_decode_cadence * 4)
+            preview = self.runtime.decode_preview_from_latent(latent, max_tokens=max(12, cfg.preview_decode_cadence * 16))
             self.state.preview_text = preview[-cfg.max_preview_len :]
             preview_history.append(self.state.preview_text)
             token_stability = self._token_stability(preview_history)
@@ -142,7 +142,7 @@ class DreamController:
             latent.committed_prefix = self.state.committed_text
 
             if self._should_commit(latent.coherence, preview_history, cfg):
-                committed_chunk = self.runtime.decode_commit_from_latent(latent, max_tokens=12)
+                committed_chunk = self.runtime.decode_commit_from_latent(latent, max_tokens=24)
                 self.state.committed_text = self._merge_committed_chunk(self.state.committed_text, committed_chunk, cfg.max_committed_len)
                 latent.committed_prefix = self.state.committed_text
 
@@ -277,9 +277,20 @@ class DreamController:
     def _token_stability(history: deque[str]) -> float:
         if len(history) < 2:
             return 0.0
-        tails = [" ".join(h.split()[-3:]) for h in history]
-        counts = {w: tails.count(w) for w in set(tails)}
-        return max(counts.values()) / len(tails)
+        token_sets = [set(h.lower().split()) for h in history if h.strip()]
+        if len(token_sets) < 2:
+            return 0.0
+        overlaps: list[float] = []
+        for i in range(1, len(token_sets)):
+            a = token_sets[i - 1]
+            b = token_sets[i]
+            union = len(a | b)
+            if union == 0:
+                continue
+            overlaps.append(len(a & b) / union)
+        if not overlaps:
+            return 0.0
+        return float(sum(overlaps) / len(overlaps))
 
     @staticmethod
     def _should_commit(coherence: float, history: deque[str], cfg: DreamConfig) -> bool:

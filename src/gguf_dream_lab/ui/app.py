@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from time import time
 
 import plotly.express as px
@@ -19,7 +20,8 @@ def create_dash_app(config: AppConfig) -> Dash:
     controller = DreamController(runtime=runtime, atlas=atlas)
     session_store = SessionStore(config.storage_dir / "sessions")
 
-    app = Dash(__name__)
+    assets_dir = Path(__file__).resolve().parents[3] / "assets"
+    app = Dash(__name__, assets_folder=str(assets_dir))
     app.title = "GGUF Dream Lab"
 
     app.layout = html.Div(
@@ -81,6 +83,7 @@ def create_dash_app(config: AppConfig) -> Dash:
                             dcc.Graph(id="latent-graph", className="latent-graph"),
                             html.Label("Scrub by step", className="control-label"),
                             dcc.Slider(id="scrub-step", min=0, max=1, step=1, value=0),
+                            html.Div(id="step-info", className="meta-line"),
                             html.Div(id="selected-state", className="selected-state"),
                         ],
                     ),
@@ -156,40 +159,94 @@ def create_dash_app(config: AppConfig) -> Dash:
         return f"Mode: {caps.active_mode.value} | backend: {caps.backend_name} | capture_sites: {caps.capture_sites or ['none']}"
 
     @app.callback(
+        Output("scrub-step", "value"),
+        Input("latent-graph", "clickData"),
+        State("scrub-step", "value"),
+        prevent_initial_call=True,
+    )
+    def select_from_graph(click_data, current):
+        if not click_data or not click_data.get("points"):
+            return current
+        point = click_data["points"][0]
+        step = point.get("customdata", [None])[0] if point.get("customdata") else point.get("x")
+        try:
+            return int(step)
+        except Exception:
+            return current
+
+    @app.callback(
         Output("preview", "children"),
         Output("committed", "children"),
         Output("metrics", "children"),
         Output("latent-graph", "figure"),
+        Output("step-info", "children"),
         Output("selected-state", "children"),
         Input("ticker", "n_intervals"),
+        Input("scrub-step", "value"),
     )
-    def refresh_stream(_):
+    def refresh_stream(_, scrub_step):
         frame = controller.atlas.to_frame()
         if frame.empty:
             fig = px.scatter(x=[0], y=[0], title="No latent states yet")
-            fig.update_layout(template="plotly_dark")
-            return "", "", "No ticks yet.", fig, ""
+            fig.update_layout(template="plotly_dark", uirevision="latent-atlas")
+            return "", "", "No ticks yet.", fig, "No step selected.", ""
 
         max_step = int(frame["step_idx"].max())
-        selected = frame[frame["step_idx"] == max_step].tail(1)
+        selected_step = max(0, min(int(scrub_step if scrub_step is not None else max_step), max_step))
+        selected = frame[frame["step_idx"] == selected_step].tail(1)
+        if selected.empty:
+            selected = frame[frame["step_idx"] == max_step].tail(1)
+            selected_step = max_step
         tick = controller.state.latest_tick
 
-        fig = px.scatter(frame, x="x", y="y", color="coherence", symbol="phase", hover_data=["state_id", "basin", "step_idx", "preview", "committed", "density", "entropy"])
         traj = frame.sort_values("step_idx")
+        fig = px.scatter(
+            traj,
+            x="x",
+            y="y",
+            color="coherence",
+            symbol="phase",
+            custom_data=["step_idx"],
+            hover_data=["state_id", "basin", "step_idx", "preview", "committed", "density", "entropy"],
+        )
         fig.add_scatter(x=traj["x"], y=traj["y"], mode="lines", line={"width": 4, "color": "#FFFFFF"}, name="trajectory")
         if not selected.empty:
             fig.add_scatter(x=selected["x"], y=selected["y"], mode="markers", marker={"size": 16, "color": "#ff4d6d"}, name="selected")
-        fig.update_layout(template="plotly_dark", title="Latent-state atlas (projection only; control stays high-dimensional)")
+        fig.update_layout(
+            template="plotly_dark",
+            title="Latent-state atlas (projection only; control stays high-dimensional)",
+            uirevision="latent-atlas",
+        )
 
         selected_txt = ""
+        step_info = f"Selected step: {selected_step} / {max_step}"
+        preview_text = ""
+        committed_text = ""
+        metrics = "No ticks yet."
         if not selected.empty:
             row = selected.iloc[0]
             selected_txt = f"selected state={row['state_id']} phase={row['phase']} basin={row['basin']}"
+            preview_text = str(row.get("preview") or "")
+            committed_text = str(row.get("committed") or "")
+            metrics = (
+                f"mode={tick.mode if tick else 'unknown'}\n"
+                f"phase={row['phase']}\n"
+                f"coherence={float(row['coherence']):.3f}\n"
+                f"entropy={float(row['entropy']):.3f}\n"
+                f"density={float(row['density']):.3f}"
+            )
 
-        if tick is None:
-            return "", "", "No ticks yet.", fig, selected_txt
-        metrics = f"mode={tick.mode}\nphase={tick.phase}\ncoherence={tick.coherence:.3f}\nentropy={tick.entropy:.3f}\ndensity={tick.local_density:.3f}\nstability={tick.token_stability:.3f}"
-        return tick.preview_text, tick.committed_text, metrics, fig, selected_txt
+        if tick is not None and selected_step == max_step:
+            metrics = (
+                f"mode={tick.mode}\n"
+                f"phase={tick.phase}\n"
+                f"coherence={tick.coherence:.3f}\n"
+                f"entropy={tick.entropy:.3f}\n"
+                f"density={tick.local_density:.3f}\n"
+                f"stability={tick.token_stability:.3f}"
+            )
+
+        return preview_text, committed_text, metrics, fig, step_info, selected_txt
 
     @app.callback(Output("scrub-step", "max"), Input("ticker", "n_intervals"))
     def refresh_scrub_max(_):
