@@ -219,9 +219,12 @@ class AtlasStorage:
         if not self.parquet_path.exists() or not self.embeddings_path.exists():
             return atlas
         df = pd.read_parquet(self.parquet_path)
-        embeddings = joblib.load(self.embeddings_path)
+        embeddings = np.asarray(joblib.load(self.embeddings_path), dtype=np.float32)
+        embedding_count = int(embeddings.shape[0]) if embeddings.ndim >= 2 else 0
+        point_count = min(len(df), embedding_count)
         points = []
-        for i, row in df.iterrows():
+        for i in range(point_count):
+            row = df.iloc[i]
             points.append(
                 StatePoint(
                     state_id=row["state_id"],
