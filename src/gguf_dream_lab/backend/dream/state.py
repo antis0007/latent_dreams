@@ -22,6 +22,12 @@ class DreamPhase(str, Enum):
     DRIFT_RESET = "DRIFT_RESET"
 
 
+class LatentSource(str, Enum):
+    EMBEDDING_PROXY = "embedding_proxy"
+    STUB_CAPTURE = "stub_capture"
+    TRUE_TENSOR_CAPTURE = "true_tensor_capture"
+
+
 @dataclass
 class LatentState:
     run_id: str
@@ -31,6 +37,7 @@ class LatentState:
     state_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: float = field(default_factory=time.time)
     capture_site: str = "embedding_proxy"
+    latent_source: LatentSource = LatentSource.EMBEDDING_PROXY
     layer_id: int | None = None
     auxiliary_vectors: dict[str, np.ndarray] = field(default_factory=dict)
     topk_logits: list[tuple[str, float]] = field(default_factory=list)
@@ -49,6 +56,7 @@ class LatentState:
             mode=self.mode,
             latent_vector=np.asarray(vector, dtype=np.float32),
             capture_site=self.capture_site,
+            latent_source=self.latent_source,
             layer_id=self.layer_id,
             auxiliary_vectors={k: np.asarray(v, dtype=np.float32) for k, v in self.auxiliary_vectors.items()},
             topk_logits=list(self.topk_logits),

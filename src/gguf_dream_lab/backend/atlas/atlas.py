@@ -27,6 +27,7 @@ class StatePoint:
     entropy: float
     embedding: np.ndarray
     phase: str = "HYPNAGOGIC"
+    latent_source: str = "embedding_proxy"
     density: float = 0.0
     recurrence: int = 0
     attractor_id: str = ""
@@ -118,6 +119,7 @@ class LatentAtlas:
                 entropy=state.entropy,
                 embedding=embedding,
                 phase=state.phase.value,
+                latent_source=state.latent_source.value,
                 density=state.density,
                 recurrence=recurrence,
                 attractor_id=attractor_id,
@@ -294,6 +296,7 @@ class LatentAtlas:
                         "preview": p.preview,
                         "committed": p.committed,
                         "phase": p.phase,
+                        "latent_source": p.latent_source,
                         "coherence": p.coherence,
                         "entropy": p.entropy,
                         "density": p.density,
@@ -355,6 +358,7 @@ class AtlasStorage:
                     preview=row["preview"],
                     committed=row["committed"],
                     phase=row.get("phase", "HYPNAGOGIC"),
+                    latent_source=row.get("latent_source", "embedding_proxy"),
                     coherence=float(row["coherence"]),
                     entropy=float(row["entropy"]),
                     density=float(row.get("density", 0.0)),

@@ -38,6 +38,7 @@ class DreamTick:
     state_id: str
     phase: str
     mode: str
+    latent_source: str
     status: str
 
 
@@ -175,6 +176,7 @@ class DreamController:
                 state_id=latent.state_id,
                 phase=phase.value,
                 mode=latent.mode.value,
+                latent_source=latent.latent_source.value,
                 status=self.state.status,
             )
             self.state.latest_tick = tick
