@@ -17,7 +17,7 @@ class _DummyRuntime:
     def evolve_latent_state(self, state: LatentState, target_vector: np.ndarray, noise_scale: float) -> LatentState:
         return state.clone_with_vector(target_vector)
 
-    def decode_preview_from_latent(self, state: LatentState, max_tokens: int = 16) -> str:
+    def decode_approximate_prompt_synthesis_preview(self, state: LatentState, max_tokens: int = 16) -> str:
         return "alpha beta gamma"
 
     def decode_commit_from_latent(self, state: LatentState, max_tokens: int = 24) -> str:
