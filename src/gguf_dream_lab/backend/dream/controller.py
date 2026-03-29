@@ -47,6 +47,7 @@ class DreamSessionState:
     preview_text: str = ""
     committed_text: str = ""
     status: str = "idle"
+    status_detail: str = ""
     latest_tick: DreamTick | None = None
 
 
@@ -62,7 +63,7 @@ class DreamController:
     def start(self, cfg: DreamConfig) -> DreamSessionState:
         if self.state.active:
             return self.state
-        self.state = DreamSessionState(active=True, paused=False, status="running")
+        self.state = DreamSessionState(active=True, paused=False, status="loading_model", status_detail="Loading model...")
         self._stop_event.clear()
         self._pause_event.clear()
         self._thread = threading.Thread(target=self._loop, args=(cfg,), daemon=True)
@@ -87,6 +88,16 @@ class DreamController:
         self.state.status = "stopped"
 
     def _loop(self, cfg: DreamConfig) -> None:
+        try:
+            self.runtime.load()
+        except Exception as exc:
+            self.state.active = False
+            self.state.status = "error"
+            self.state.status_detail = f"Model load failed: {exc}"
+            return
+
+        self.state.status = "running"
+        self.state.status_detail = ""
         period = 1.0 / max(cfg.tick_hz, 0.1)
         preview_history: deque[str] = deque(maxlen=4)
         prev_vec = None
@@ -99,7 +110,13 @@ class DreamController:
                 time.sleep(0.05)
                 continue
             tick_start = time.perf_counter()
-            step = self.runtime.sample_step(prompt=prompt, max_tokens=12)
+            try:
+                step = self.runtime.sample_step(prompt=prompt, max_tokens=12)
+            except Exception as exc:
+                self.state.status = "error"
+                self.state.status_detail = f"Runtime step failed: {exc}"
+                self._stop_event.set()
+                break
             token = step.token.strip()
             if token:
                 self.state.preview_text = (self.state.preview_text + " " + token).strip()[-cfg.max_preview_len :]

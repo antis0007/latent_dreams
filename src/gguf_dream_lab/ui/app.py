@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import time
 
 import plotly.express as px
 from dash import Dash, Input, Output, State, callback_context, dcc, html
@@ -105,11 +106,12 @@ def create_dash_app(config: AppConfig) -> Dash:
             ),
             dcc.Graph(id="latent-graph", style={"height": "480px", "marginTop": "12px"}),
             dcc.Interval(id="ticker", interval=int(1000 / max(config.dream.tick_hz, 0.5)), n_intervals=0),
+            dcc.Store(id="control-ack"),
         ],
     )
 
     @app.callback(
-        Output("status", "children"),
+        Output("control-ack", "data"),
         Input("start-btn", "n_clicks"),
         Input("pause-btn", "n_clicks"),
         Input("resume-btn", "n_clicks"),
@@ -134,22 +136,26 @@ def create_dash_app(config: AppConfig) -> Dash:
         elif trigger == "stop-btn":
             controller.stop()
             atlas_store.save(controller.atlas)
-        return f"Status: {controller.state.status}"
+        return {"at": time(), "status": controller.state.status}
 
     @app.callback(
+        Output("status", "children"),
         Output("preview", "children"),
         Output("committed", "children"),
         Output("metrics", "children"),
         Output("latent-graph", "figure"),
         Output("selected-state", "children"),
         Input("ticker", "n_intervals"),
+        Input("control-ack", "data"),
     )
-    def refresh(_):
+    def refresh(_, __):
+        detail = f" — {controller.state.status_detail}" if controller.state.status_detail else ""
+        status_text = f"Status: {controller.state.status}{detail}"
         tick = controller.state.latest_tick
         if tick is None:
             fig = px.scatter(x=[0], y=[0], title="No latent states yet")
             fig.update_layout(template="plotly_dark")
-            return "", "", "No ticks yet.", fig, ""
+            return status_text, "", "", "No ticks yet.", fig, ""
 
         frame = controller.atlas.to_frame()
         color_mode = "coherence" if "coherence" in frame.columns else None
@@ -170,7 +176,7 @@ def create_dash_app(config: AppConfig) -> Dash:
             f"token_stability={tick.token_stability:.3f}\n"
             f"smoothness={tick.smoothness:.3f}"
         )
-        return tick.preview_text, tick.committed_text, metrics, fig, selected
+        return status_text, tick.preview_text, tick.committed_text, metrics, fig, selected
 
     return app
 
