@@ -173,7 +173,8 @@ def create_dash_app(config: AppConfig) -> Dash:
             hover_data=["state_id", "run_label", "basin", "step_idx", "preview", "committed", "entropy", "coherence"],
             title="Latent State Trajectory (approximate in baseline mode)",
         )
-        fig.update_layout(template="plotly_dark", marker=dict(size=10, line=dict(width=2, color="#ffffff")))
+        fig.update_layout(template="plotly_dark")
+        fig.update_traces(marker=dict(size=10, line=dict(width=2, color="#ffffff")))
         selected = f"state={tick.state_id} run={tick.run_id} step={tick.step_idx}"
         metrics = (
             f"coherence={tick.coherence:.3f}\n"
