@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import RLock
 
 import joblib
 import numpy as np
@@ -31,10 +32,12 @@ class LatentAtlas:
     projection_2d: np.ndarray | None = None
     nn: NearestNeighbors | None = None
     cluster_labels: np.ndarray | None = None
+    _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
     def append_points(self, new_points: list[StatePoint]) -> None:
-        self.points.extend(new_points)
-        self._rebuild_indexes()
+        with self._lock:
+            self.points.extend(new_points)
+            self._rebuild_indexes()
 
     def _rebuild_indexes(self) -> None:
         if not self.points:
@@ -55,41 +58,48 @@ class LatentAtlas:
         self.cluster_labels = MiniBatchKMeans(n_clusters=n_clusters, n_init="auto", random_state=0).fit_predict(mat)
 
     def neighbors(self, index: int, k: int = 6) -> list[int]:
-        if self.nn is None or not self.points:
-            return []
-        mat = np.stack([p.embedding for p in self.points], axis=0)
-        distances, indices = self.nn.kneighbors(mat[index].reshape(1, -1), n_neighbors=min(k, len(self.points)))
-        return indices[0].tolist()
+        with self._lock:
+            if self.nn is None or not self.points:
+                return []
+            mat = np.stack([p.embedding for p in self.points], axis=0)
+            distances, indices = self.nn.kneighbors(mat[index].reshape(1, -1), n_neighbors=min(k, len(self.points)))
+            return indices[0].tolist()
 
     def local_density(self, index: int, k: int = 6) -> float:
-        if self.nn is None or len(self.points) < 2:
-            return 0.0
-        mat = np.stack([p.embedding for p in self.points], axis=0)
-        distances, _ = self.nn.kneighbors(mat[index].reshape(1, -1), n_neighbors=min(k, len(self.points)))
-        avg_dist = float(np.mean(distances[0][1:])) if distances.shape[1] > 1 else float(np.mean(distances[0]))
-        return 1.0 / (avg_dist + 1e-6)
+        with self._lock:
+            if self.nn is None or len(self.points) < 2:
+                return 0.0
+            mat = np.stack([p.embedding for p in self.points], axis=0)
+            distances, _ = self.nn.kneighbors(mat[index].reshape(1, -1), n_neighbors=min(k, len(self.points)))
+            avg_dist = float(np.mean(distances[0][1:])) if distances.shape[1] > 1 else float(np.mean(distances[0]))
+            return 1.0 / (avg_dist + 1e-6)
 
     def to_frame(self) -> pd.DataFrame:
-        rows = []
-        for i, p in enumerate(self.points):
-            x, y = self.projection_2d[i] if self.projection_2d is not None else (0.0, 0.0)
-            rows.append(
-                {
-                    "state_id": p.state_id,
-                    "run_id": p.run_id,
-                    "run_label": p.run_label,
-                    "basin": p.basin,
-                    "step_idx": p.step_idx,
-                    "preview": p.preview,
-                    "committed": p.committed,
-                    "coherence": p.coherence,
-                    "entropy": p.entropy,
-                    "x": float(x),
-                    "y": float(y),
-                    "cluster": int(self.cluster_labels[i]) if self.cluster_labels is not None else -1,
-                }
-            )
-        return pd.DataFrame(rows)
+        with self._lock:
+            rows = []
+            for i, p in enumerate(self.points):
+                if self.projection_2d is not None and i < len(self.projection_2d):
+                    x, y = self.projection_2d[i]
+                else:
+                    x, y = (0.0, 0.0)
+                cluster = int(self.cluster_labels[i]) if self.cluster_labels is not None and i < len(self.cluster_labels) else -1
+                rows.append(
+                    {
+                        "state_id": p.state_id,
+                        "run_id": p.run_id,
+                        "run_label": p.run_label,
+                        "basin": p.basin,
+                        "step_idx": p.step_idx,
+                        "preview": p.preview,
+                        "committed": p.committed,
+                        "coherence": p.coherence,
+                        "entropy": p.entropy,
+                        "x": float(x),
+                        "y": float(y),
+                        "cluster": cluster,
+                    }
+                )
+            return pd.DataFrame(rows)
 
 
 class AtlasStorage:

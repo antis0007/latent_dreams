@@ -23,3 +23,30 @@ def test_atlas_append_growth():
             ]
         )
     assert len(atlas.points) == 5
+
+
+def test_to_frame_tolerates_partial_cluster_labels():
+    atlas = LatentAtlas()
+    atlas.append_points(
+        [
+            StatePoint(
+                state_id=f"s{i}",
+                run_id="r",
+                run_label="x",
+                basin="narrative",
+                step_idx=i,
+                preview="p",
+                committed="c",
+                coherence=0.5,
+                entropy=0.5,
+                embedding=np.random.randn(16).astype("float32"),
+            )
+            for i in range(3)
+        ]
+    )
+    atlas.cluster_labels = np.array([0, 1], dtype=int)
+
+    frame = atlas.to_frame()
+
+    assert len(frame) == 3
+    assert frame.loc[2, "cluster"] == -1
