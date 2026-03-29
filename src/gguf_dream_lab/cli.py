@@ -47,6 +47,12 @@ def diagnostics(config_path: Path | None = typer.Option(None, "--config")) -> No
         "supports_instrumented_latents": caps.supports_instrumented_latents,
         "active_mode": caps.active_mode.value,
         "capture_sites": caps.capture_sites,
+        "instrumentation_verification": {
+            "source": caps.instrumentation_verification_source,
+            "metadata": caps.instrumentation_verification_metadata,
+            "downgrade_reasons": caps.instrumentation_downgrade_reasons,
+            "verified_for_true_mode": caps.supports_instrumented_latents,
+        },
         "runtime_behaviors": {
             "capture": caps.supports_capture,
             "reinject": caps.supports_reinject,

@@ -19,6 +19,8 @@ class InstrumentationVerification:
     source: str
     capture_site_ids: list[str]
     tensor_shape_metadata: dict[str, int]
+    verification_metadata: dict[str, str]
+    downgrade_reasons: list[str]
     warning: str | None = None
 
 
@@ -44,6 +46,8 @@ class BaselineNoopInstrumentation:
             source="baseline_noop",
             capture_site_ids=[],
             tensor_shape_metadata={},
+            verification_metadata={},
+            downgrade_reasons=["instrumentation_unavailable"],
             warning="Instrumentation unavailable; backend evidence could not be verified.",
         )
 
@@ -74,6 +78,8 @@ class ExperimentalLlamaForkAdapter:
                 source="instrumented_disabled",
                 capture_site_ids=[],
                 tensor_shape_metadata={},
+                verification_metadata={},
+                downgrade_reasons=["instrumented_adapter_disabled"],
                 warning="Instrumented adapter disabled; backend evidence could not be verified.",
             )
         capture = self.capture()
@@ -83,6 +89,8 @@ class ExperimentalLlamaForkAdapter:
                 source="instrumented_capture_missing",
                 capture_site_ids=[],
                 tensor_shape_metadata={},
+                verification_metadata={},
+                downgrade_reasons=["instrumented_capture_missing"],
                 warning="Instrumented adapter returned no capture during verification.",
             )
         capture_site_id = f"layer_{capture.layer}"
@@ -90,6 +98,14 @@ class ExperimentalLlamaForkAdapter:
             "ndim": int(capture.vector.ndim),
             "size": int(capture.vector.size),
         }
+        metadata = {
+            "backend_variant": str(capture.metadata.get("backend_variant", "")),
+            "instrumentation_commit": str(capture.metadata.get("instrumentation_commit", "")),
+            "capture_api": str(capture.metadata.get("capture_api", "")),
+            "tensor_dtype": str(capture.vector.dtype),
+        }
+        missing_metadata = [key for key, value in metadata.items() if not value]
+        downgrade_reasons = [f"missing_verification_metadata:{key}" for key in missing_metadata]
         is_stub = str(capture.metadata.get("source", "")) == "instrumented_stub"
         if is_stub:
             return InstrumentationVerification(
@@ -97,18 +113,23 @@ class ExperimentalLlamaForkAdapter:
                 source="instrumented_stub",
                 capture_site_ids=[capture_site_id],
                 tensor_shape_metadata=tensor_shape_metadata,
+                verification_metadata=metadata,
+                downgrade_reasons=["instrumented_stub_capture", *downgrade_reasons],
                 warning=(
                     "Instrumentation verification failed: source=instrumented_stub; "
                     "backend evidence is synthetic and true mode promotion is disabled."
                 ),
             )
         vector_is_concrete = capture.vector.ndim > 0 and capture.vector.size > 0
+        verified = vector_is_concrete and not missing_metadata
         return InstrumentationVerification(
-            verified=vector_is_concrete,
+            verified=verified,
             source=str(capture.metadata.get("source", "instrumented_real")),
             capture_site_ids=[capture_site_id],
             tensor_shape_metadata=tensor_shape_metadata,
-            warning=None if vector_is_concrete else "Instrumented capture vector was empty.",
+            verification_metadata=metadata,
+            downgrade_reasons=downgrade_reasons + ([] if vector_is_concrete else ["empty_capture_vector"]),
+            warning=None if verified else "Instrumented capture evidence incomplete; true mode promotion is disabled.",
         )
 
     def capture_sites(self) -> list[str]:
@@ -120,7 +141,16 @@ class ExperimentalLlamaForkAdapter:
         chosen = int(layer) if layer is not None else 16
         rng = np.random.default_rng(chosen)
         vec = rng.normal(size=256).astype(np.float32)
-        return LatentCapture(layer=chosen, vector=vec, metadata={"source": "instrumented_stub"})
+        return LatentCapture(
+            layer=chosen,
+            vector=vec,
+            metadata={
+                "source": "instrumented_stub",
+                "backend_variant": "llama.cpp.experimental.stub",
+                "instrumentation_commit": "",
+                "capture_api": "latent_capture_v0",
+            },
+        )
 
     def reinject(self, capture: LatentCapture) -> bool:
         return self.enabled and capture.vector.size > 0

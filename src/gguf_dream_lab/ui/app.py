@@ -334,11 +334,17 @@ def create_dash_app(config: AppConfig) -> Dash:
         suffix = ""
         if contract.downgraded:
             suffix = f" | contract_downgrade_missing={contract.missing_behaviors}"
+        verification_suffix = ""
+        if caps.instrumentation_downgrade_reasons:
+            verification_suffix = (
+                f" | verification_source={caps.instrumentation_verification_source}"
+                f" | verification_downgrade_reasons={caps.instrumentation_downgrade_reasons}"
+            )
         return (
             f"Mode: {contract.effective_mode.value} | backend: {caps.backend_name} "
             f"| behaviors=capture:{caps.supports_capture},reinject:{caps.supports_reinject},"
             f"decode_provenance:{caps.supports_decode_provenance},control_authority:{caps.supports_control_authority} "
-            f"| capture_sites: {caps.capture_sites or ['none']}{suffix}"
+            f"| capture_sites: {caps.capture_sites or ['none']}{suffix}{verification_suffix}"
         )
 
     @app.callback(Output("preview-title", "children"), Input("ticker", "n_intervals"))
