@@ -14,6 +14,7 @@ from gguf_dream_lab.backend.dream.state import DreamMode, LatentState
 from gguf_dream_lab.backend.instrumentation.adapters import (
     ExperimentalLlamaForkAdapter,
     InstrumentationAdapter,
+    InstrumentationVerification,
     LatentCapture,
 )
 from gguf_dream_lab.config.models import RuntimeConfig
@@ -91,11 +92,15 @@ class LlamaCppBackend(RuntimeBackend):
         warnings = []
         if self._llama_error:
             warnings.append(self._llama_error)
-        supports_true = self.instrumentation.available()
+        verification: InstrumentationVerification = self.instrumentation.verify_backend_evidence()
+        supports_true = self.instrumentation.available() and verification.verified
+        if verification.warning:
+            warnings.append(verification.warning)
         mode = DreamMode.TRUE_LATENT_INSTRUMENTED if supports_true else DreamMode.ENHANCED_LATENT
         if not self.config.embedding:
             mode = DreamMode.BASELINE_APPROXIMATE
             warnings.append("Embeddings disabled; falling back to baseline approximate mode.")
+        capture_sites = list(dict.fromkeys([*self.instrumentation.capture_sites(), *verification.capture_site_ids]))
         return RuntimeCapabilities(
             supports_embeddings=self.config.embedding,
             supports_logits_all=self.config.logits_all,
@@ -103,7 +108,7 @@ class LlamaCppBackend(RuntimeBackend):
             supports_instrumented_latents=supports_true,
             backend_name="llama.cpp (via llama-cpp-python)" if self._llm else "synthetic-fallback",
             warnings=warnings,
-            capture_sites=self.instrumentation.capture_sites(),
+            capture_sites=capture_sites,
             active_mode=mode,
         )
 
