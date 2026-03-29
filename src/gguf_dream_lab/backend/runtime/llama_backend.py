@@ -175,15 +175,65 @@ class LlamaCppBackend(RuntimeBackend):
         return state.clone_with_vector(proposal)
 
     def decode_preview_from_latent(self, state: LatentState, max_tokens: int = 16) -> str:
+        self.load()
+        if self._llm is not None:
+            seed = state.metadata.get("prompt_seed", "")
+            context = state.committed_prefix.strip()
+            phase = str(state.phase.value).replace("_", " ").lower()
+            prompt = (
+                f"Dream prompt: {seed}\n"
+                f"Dream phase: {phase}\n"
+                f"Committed memory: {context or '[none]'}\n"
+                "Continue the dream with vivid concrete imagery:"
+            )
+            try:
+                out = self._llm(
+                    prompt,
+                    max_tokens=max(8, int(max_tokens)),
+                    temperature=min(1.35, max(0.2, self.config.temperature + 0.1)),
+                    top_k=max(20, int(self.config.top_k)),
+                    top_p=min(0.99, max(0.6, self.config.top_p)),
+                    repeat_penalty=max(1.0, self.config.repeat_penalty),
+                    echo=False,
+                    stream=False,
+                )
+                text = out["choices"][0]["text"].strip()
+                if text:
+                    return text
+            except Exception:
+                pass
+
         hash_seed = abs(hash(state.latent_vector.tobytes()[:64])) % (2**32)
         rng = np.random.default_rng(hash_seed)
-        lex = ["echo", "drift", "velvet", "signal", "memory", "city", "glass", "night"]
-        count = max(2, min(max_tokens, 10))
+        lex = [
+            "echo",
+            "drift",
+            "velvet",
+            "signal",
+            "memory",
+            "city",
+            "glass",
+            "night",
+            "corridor",
+            "lantern",
+            "rain",
+            "threshold",
+            "hushed",
+            "mirror",
+            "orbit",
+            "paper",
+            "shimmer",
+            "voice",
+            "shore",
+            "clock",
+        ]
+        count = max(8, min(max_tokens, 28))
         return " ".join(rng.choice(lex, size=count, replace=True).tolist())
 
     def decode_commit_from_latent(self, state: LatentState, max_tokens: int = 24) -> str:
         preview = self.decode_preview_from_latent(state, max_tokens=max_tokens)
-        return " ".join(preview.split()[: max(3, max_tokens // 2)])
+        words = preview.split()
+        return " ".join(words[: max(8, min(len(words), max_tokens))])
 
     def benchmark(self, prompt: str, steps: int = 16) -> dict[str, Any]:
         self.load()
