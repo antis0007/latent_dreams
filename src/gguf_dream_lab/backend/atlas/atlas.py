@@ -221,7 +221,7 @@ class AtlasStorage:
         df = pd.read_parquet(self.parquet_path)
         embeddings = joblib.load(self.embeddings_path)
         points = []
-        for i, row in df.iterrows():
+        for i, (_, row) in enumerate(df.iterrows()):
             points.append(
                 StatePoint(
                     state_id=row["state_id"],
