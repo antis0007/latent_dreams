@@ -37,6 +37,8 @@ def diagnostics(config_path: Path | None = typer.Option(None, "--config")) -> No
         "supports_logits_all": caps.supports_logits_all,
         "supports_streaming": caps.supports_streaming,
         "supports_instrumented_latents": caps.supports_instrumented_latents,
+        "active_mode": caps.active_mode.value,
+        "capture_sites": caps.capture_sites,
         "warnings": caps.warnings,
     }
     print(json.dumps(report, indent=2))

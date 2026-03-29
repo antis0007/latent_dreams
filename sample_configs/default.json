@@ -13,11 +13,13 @@
     "top_k": 40,
     "top_p": 0.95,
     "repeat_penalty": 1.05,
-    "seed": 42
+    "seed": 42,
+    "prefer_true_latent": true,
+    "instrumented_backend": false
   },
   "dream": {
     "prompt": "",
-    "basin": "narrative",
+    "basin": "prompt_conditioned",
     "tick_hz": 1.5,
     "noise_amplitude": 0.15,
     "coherence_threshold": 0.62,
@@ -25,7 +27,9 @@
     "randomness": 0.9,
     "max_preview_len": 220,
     "max_committed_len": 2000,
-    "branch_count": 1,
+    "branch_count": 2,
+    "preview_decode_cadence": 1,
+    "stability_window": 4,
     "run_label": "local-mvp",
     "weights": {
       "entropy": 0.2,
