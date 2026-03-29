@@ -79,3 +79,42 @@ def test_neighbors_handles_stale_nn_index_without_raising():
 
     assert isinstance(neighbors, list)
     assert len(neighbors) <= 3
+
+
+def test_append_latent_state_tracks_recurrence_and_attractor_strength():
+    from gguf_dream_lab.backend.dream.state import DreamMode, LatentState
+
+    atlas = LatentAtlas(recurrence_distance_threshold=0.25)
+    base = np.zeros(8, dtype=np.float32)
+    far = np.ones(8, dtype=np.float32) * 5.0
+
+    a = LatentState(run_id="r", basin="narrative", mode=DreamMode.ENHANCED_LATENT, latent_vector=base, timestamp=10.0)
+    b = LatentState(
+        run_id="r",
+        basin="narrative",
+        mode=DreamMode.ENHANCED_LATENT,
+        latent_vector=base + 0.01,
+        timestamp=11.0,
+    )
+    c = LatentState(run_id="r", basin="narrative", mode=DreamMode.ENHANCED_LATENT, latent_vector=far, timestamp=12.0)
+    d = LatentState(
+        run_id="r",
+        basin="narrative",
+        mode=DreamMode.ENHANCED_LATENT,
+        latent_vector=base + 0.02,
+        timestamp=14.0,
+    )
+
+    first = atlas.append_latent_state(a, run_label="x", step_idx=0)
+    second = atlas.append_latent_state(b, run_label="x", step_idx=1)
+    atlas.append_latent_state(c, run_label="x", step_idx=2)
+    fourth = atlas.append_latent_state(d, run_label="x", step_idx=4)
+
+    assert first.recurrence == 1
+    assert second.attractor_id == first.state_id
+    assert fourth.return_count == 1
+    assert fourth.visit_count == 3
+    assert fourth.attractor_strength > 0.0
+
+    ranked = atlas.candidate_attractors(basin="narrative", top_k=2)
+    assert ranked[0].attractor_id == first.state_id
