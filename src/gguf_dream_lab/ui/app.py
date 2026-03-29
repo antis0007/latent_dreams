@@ -105,9 +105,9 @@ def create_dash_app(config: AppConfig) -> Dash:
         Output("latent-graph", "figure"),
         Output("selected-state", "children"),
         Input("ticker", "n_intervals"),
-        Input("scrub-step", "value"),
+        Input("control-ack", "data"),
     )
-    def refresh_stream(_, scrub_idx):
+    def refresh_stream(_, __):
         frame = controller.atlas.to_frame()
         if frame.empty:
             fig = px.scatter(x=[0], y=[0], title="No latent states yet")
@@ -115,8 +115,7 @@ def create_dash_app(config: AppConfig) -> Dash:
             return "", "", "No ticks yet.", fig, ""
 
         max_step = int(frame["step_idx"].max())
-        selected_step = min(int(scrub_idx or max_step), max_step)
-        selected = frame[frame["step_idx"] == selected_step].tail(1)
+        selected = frame[frame["step_idx"] == max_step].tail(1)
         tick = controller.state.latest_tick
 
         fig = px.scatter(frame, x="x", y="y", color="coherence", symbol="phase", hover_data=["state_id", "basin", "step_idx", "preview", "committed", "density", "entropy"])
