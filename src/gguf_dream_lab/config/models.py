@@ -16,6 +16,12 @@ class Basin(str, Enum):
     PROMPT_CONDITIONED = "prompt_conditioned"
 
 
+class BranchSelectionPolicy(str, Enum):
+    GREEDY = "greedy"
+    EPSILON_GREEDY = "epsilon_greedy"
+    SOFTMAX = "softmax"
+
+
 class RuntimeConfig(BaseModel):
     model_path: Optional[Path] = None
     n_ctx: int = 4096
@@ -56,6 +62,9 @@ class DreamConfig(BaseModel):
     max_preview_len: int = 220
     max_committed_len: int = 2000
     branch_count: int = 1
+    branch_selection_policy: BranchSelectionPolicy = BranchSelectionPolicy.GREEDY
+    branch_policy_temperature: float = Field(default=0.75, gt=0.0)
+    branch_policy_exploration: float = Field(default=0.10, ge=0.0, le=1.0)
     basin_force_weight: float = Field(default=0.2, ge=0.0, le=1.0)
     basin_retention: float = Field(default=0.65, ge=0.0, le=1.0)
     basin_drift: float = Field(default=0.1, ge=0.0, le=1.0)

@@ -6,6 +6,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 import hashlib
+import json
 
 import numpy as np
 
@@ -13,7 +14,7 @@ from gguf_dream_lab.backend.atlas.atlas import LatentAtlas, TransitionEdge
 from gguf_dream_lab.backend.dream.coherence import score_coherence
 from gguf_dream_lab.backend.dream.state import DreamMode, DreamPhase, LatentState
 from gguf_dream_lab.backend.runtime.base import RuntimeBackend
-from gguf_dream_lab.config.models import Basin, CoherenceWeights, DreamConfig
+from gguf_dream_lab.config.models import Basin, BranchSelectionPolicy, CoherenceWeights, DreamConfig
 
 SEED_BASIN_PREFIX = {
     Basin.NULL_PRIOR: "",
@@ -46,6 +47,8 @@ class DreamTick:
     branch_seed: int
     branch_score: float
     candidate_scores: str
+    rejected_candidates: str
+    selected_branch_trace: str
     basin_sample_count: int
     basin_mean_coherence: float
     basin_mean_density: float
@@ -118,6 +121,10 @@ class DreamController:
         self.state.status = "running"
         period = 1.0 / max(cfg.tick_hz, 0.1)
         preview_history: deque[str] = deque(maxlen=max(cfg.stability_window, 2))
+        self._branch_policy_temperature = float(cfg.branch_policy_temperature)
+        self._branch_policy_exploration = float(cfg.branch_policy_exploration)
+        policy_seed = self._branch_seed(self.state.run_id, 0, 10_001)
+        self._policy_random = np.random.default_rng(policy_seed)
         basin_prefix = SEED_BASIN_PREFIX[cfg.basin]
         prompt = (basin_prefix + " " + cfg.prompt).strip()
         latent = self._seed_latent_state(cfg, prompt)
@@ -132,6 +139,7 @@ class DreamController:
             tick_start = time.perf_counter()
             phase = self._phase_for_step(self.state.step_idx)
             candidates = self._branch_candidates(latent, cfg, anneal, phase, step_idx=self.state.step_idx)
+            latent.metadata["branch_selection_policy"] = cfg.branch_selection_policy.value
             latent = self._choose_candidate(candidates, prev_latent=latent)
             candidate_scores = str(latent.metadata.get("candidate_scores", "[]"))
             preview = self._decode_preview(latent, max_tokens=max(12, cfg.preview_decode_cadence * 16))
@@ -204,6 +212,8 @@ class DreamController:
                 branch_seed=int(latent.metadata.get("branch_seed", 0)),
                 branch_score=float(latent.metadata.get("branch_score", 0.0)),
                 candidate_scores=candidate_scores,
+                rejected_candidates=str(latent.metadata.get("rejected_candidates", "[]")),
+                selected_branch_trace=str(latent.metadata.get("selected_branch_trace", "{}")),
                 basin_sample_count=int(latent.metadata.get("basin_sample_count", 0)),
                 basin_mean_coherence=float(latent.metadata.get("basin_mean_coherence", 0.0)),
                 basin_mean_density=float(latent.metadata.get("basin_mean_density", 0.0)),
@@ -317,6 +327,7 @@ class DreamController:
                 distance_to_attractor=distance_to_attractor,
                 temporal_smoothness=branch_smoothness,
             )
+            distance_penalty = min(distance_to_attractor / 3.0, 1.0)
             proposal.metadata["branch_agreement"] = branch_agreement
             proposal.metadata["branch_id"] = branch_id
             proposal.metadata["branch_seed"] = branch_seed
@@ -325,6 +336,12 @@ class DreamController:
             proposal.metadata["distance_to_attractor"] = distance_to_attractor
             proposal.metadata["temporal_smoothness"] = branch_smoothness
             proposal.metadata["branch_score"] = branch_score
+            proposal.metadata["branch_objective_scores"] = {
+                "coherence_estimate": float(branch_coherence_estimate),
+                "temporal_smoothness": float(branch_smoothness),
+                "distance_penalty": float(distance_penalty),
+                "total_score": float(branch_score),
+            }
             proposal.metadata["basin_sample_count"] = int(prior.get("sample_count", 0)) if prior else 0
             proposal.metadata["basin_mean_coherence"] = float(prior.get("mean_coherence", 0.0)) if prior else 0.0
             proposal.metadata["basin_mean_density"] = float(prior.get("mean_density", 0.0)) if prior else 0.0
@@ -335,25 +352,98 @@ class DreamController:
 
     def _choose_candidate(self, candidates: list[LatentState], *, prev_latent: LatentState) -> LatentState:
         if len(candidates) == 1:
-            candidates[0].metadata["candidate_scores"] = str(
-                [{"branch_id": candidates[0].metadata.get("branch_id", ""), "score": float(candidates[0].metadata.get("branch_score", 0.0))}]
+            candidate = candidates[0]
+            candidate.metadata["branch_rank"] = 1
+            candidate.metadata["candidate_scores"] = str(
+                [
+                    {
+                        "branch_id": candidate.metadata.get("branch_id", ""),
+                        "score": float(candidate.metadata.get("branch_score", 0.0)),
+                        "objective_scores": candidate.metadata.get("branch_objective_scores", {}),
+                    }
+                ]
             )
-            return candidates[0]
+            candidate.metadata["rejected_candidates"] = "[]"
+            candidate.metadata["selected_branch_trace"] = json.dumps(
+                {
+                    "policy": "single_candidate",
+                    "winner_branch_id": candidate.metadata.get("branch_id", ""),
+                    "winner_score": float(candidate.metadata.get("branch_score", 0.0)),
+                }
+            )
+            candidate.metadata["selected_from_state_id"] = prev_latent.state_id
+            return candidate
         scored = sorted(
             enumerate(candidates),
             key=lambda item: float(item[1].metadata.get("branch_score", float("-inf"))),
             reverse=True,
         )
+        selected_rank = self._select_rank_by_policy(scored=scored, policy=prev_latent.metadata.get("branch_selection_policy"))
         for rank, (_, candidate) in enumerate(scored, start=1):
             candidate.metadata["branch_rank"] = rank
-        candidate_scores = [
-            {"branch_id": str(candidate.metadata.get("branch_id", "")), "score": float(candidate.metadata.get("branch_score", 0.0))}
-            for _, candidate in scored
+        candidate_scores = []
+        for rank, (_, candidate) in enumerate(scored, start=1):
+            candidate_scores.append(
+                {
+                    "branch_id": str(candidate.metadata.get("branch_id", "")),
+                    "score": float(candidate.metadata.get("branch_score", 0.0)),
+                    "rank": rank,
+                    "objective_scores": candidate.metadata.get("branch_objective_scores", {}),
+                }
+            )
+        selected = scored[selected_rank][1]
+        rejected_candidates = [
+            {
+                "branch_id": str(candidate.metadata.get("branch_id", "")),
+                "score": float(candidate.metadata.get("branch_score", 0.0)),
+                "rank": rank,
+                "objective_scores": candidate.metadata.get("branch_objective_scores", {}),
+                "rejected_reason": "not_selected_by_policy",
+            }
+            for rank, (_, candidate) in enumerate(scored, start=1)
+            if candidate is not selected
         ]
-        selected = scored[0][1]
         selected.metadata["selected_from_state_id"] = prev_latent.state_id
         selected.metadata["candidate_scores"] = str(candidate_scores)
+        selected.metadata["rejected_candidates"] = str(rejected_candidates)
+        selected.metadata["selected_branch_trace"] = json.dumps(
+            {
+                "policy": str(prev_latent.metadata.get("branch_selection_policy", BranchSelectionPolicy.GREEDY.value)),
+                "winner_branch_id": str(selected.metadata.get("branch_id", "")),
+                "winner_rank": int(selected.metadata.get("branch_rank", 1)),
+                "winner_score": float(selected.metadata.get("branch_score", 0.0)),
+            }
+        )
         return selected
+
+    def _select_rank_by_policy(self, *, scored: list[tuple[int, LatentState]], policy: str | None) -> int:
+        try:
+            effective_policy = BranchSelectionPolicy(str(policy or BranchSelectionPolicy.GREEDY.value))
+        except ValueError:
+            effective_policy = BranchSelectionPolicy.GREEDY
+        if effective_policy == BranchSelectionPolicy.GREEDY:
+            return 0
+        best_idx = 0
+        if effective_policy == BranchSelectionPolicy.EPSILON_GREEDY:
+            epsilon = float(getattr(self, "_branch_policy_exploration", 0.1))
+            if self._policy_rng().random() < epsilon:
+                return int(self._policy_rng().integers(0, len(scored)))
+            return best_idx
+        temperature = max(1e-6, float(getattr(self, "_branch_policy_temperature", 0.75)))
+        scores = np.asarray([float(candidate.metadata.get("branch_score", 0.0)) for _, candidate in scored], dtype=np.float64)
+        adjusted = scores - np.max(scores)
+        probs = np.exp(adjusted / temperature)
+        probs_sum = float(np.sum(probs))
+        if probs_sum <= 0:
+            return best_idx
+        probs = probs / probs_sum
+        selected = int(self._policy_rng().choice(np.arange(len(scored)), p=probs))
+        return selected
+
+    def _policy_rng(self) -> np.random.Generator:
+        if not hasattr(self, "_policy_random"):
+            self._policy_random = np.random.default_rng()
+        return self._policy_random
 
     def _preview_decode_source(self) -> str:
         if self._decode_capability_level() == "true_latent_readout":
