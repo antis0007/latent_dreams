@@ -290,7 +290,8 @@ class DreamController:
     def _decode_preview(self, latent: LatentState, max_tokens: int) -> str:
         if self._decode_capability_level() == "true_latent_readout":
             return self.runtime.decode_true_latent_readout_preview(latent, max_tokens=max_tokens)
-        return self.runtime.decode_approximate_prompt_synthesis_preview(latent, max_tokens=max_tokens)
+        latent.metadata["preview_decode_unavailable"] = "true_latent_readout_required"
+        return "[preview unavailable: true latent readout is required]"
 
     def _seed_latent_state(self, cfg: DreamConfig, prompt: str) -> LatentState:
         latent = self._normalize_latent_state(self.runtime.capture_latent_state(self.state.run_id, cfg.basin.value, prompt))
@@ -566,7 +567,7 @@ class DreamController:
     def _preview_decode_source(self) -> str:
         if self._decode_capability_level() == "true_latent_readout":
             return "decode_true_latent_readout_preview"
-        return "decode_approximate_prompt_synthesis_preview"
+        return "decode_unavailable_true_latent_required"
 
     @staticmethod
     def _adaptive_noise(cfg: DreamConfig, *, anneal: float, recent_coherence: float) -> float:
@@ -588,7 +589,7 @@ class DreamController:
             return "true_latent_readout"
         if caps.supports_instrumented_latents:
             return "instrumented_capture_only"
-        return "approximate_prompt_synthesis_only"
+        return "true_latent_readout_unavailable"
 
     def _distance_to_attractor(self, vec: np.ndarray, *, basin: str) -> float:
         attractors = self.atlas.candidate_attractors(basin=basin, top_k=5)
