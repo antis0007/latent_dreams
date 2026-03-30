@@ -4,7 +4,7 @@ import types
 
 import numpy as np
 
-from gguf_dream_lab.backend.dream.state import DreamMode, LatentState
+from gguf_dream_lab.backend.dream.state import DreamMode, LatentSource, LatentState
 from gguf_dream_lab.backend.instrumentation.adapters import (
     InstrumentationVerification,
     LatentCapture,
@@ -80,7 +80,13 @@ def test_stubbed_instrumentation_does_not_promote_true_mode():
 
         def capture(self, layer: int | None = None) -> LatentCapture | None:
             del layer
-            return LatentCapture(layer=16, vector=np.ones(256, dtype=np.float32), metadata={"source": "instrumented_stub"})
+            return LatentCapture(
+                layer=16,
+                site_id="post_attn_l16",
+                vector=np.ones(256, dtype=np.float32),
+                tensors={"residual_stream": np.ones(256, dtype=np.float32)},
+                metadata={"source": "instrumented_stub"},
+            )
 
         def reinject(self, capture: LatentCapture) -> bool:
             return bool(capture.vector.size)
@@ -145,3 +151,134 @@ def test_decode_commit_from_latent_uses_true_decode_source_when_capability_is_av
 
     assert committed == "true decode commit"
     assert state.metadata["commit_source"] == "true_latent_decode"
+
+
+def test_capture_maps_instrumentation_tensors_into_latent_state():
+    class VerifiedAdapter:
+        def available(self) -> bool:
+            return True
+
+        def verify_backend_evidence(self) -> InstrumentationVerification:
+            return InstrumentationVerification(
+                verified=True,
+                source="instrumented_real",
+                capture_site_ids=["post_attn_l16"],
+                tensor_shape_metadata={"ndim": 1, "size": 4},
+                verification_metadata={
+                    "backend_variant": "llama.cpp.instrumented",
+                    "instrumentation_commit": "abc123",
+                    "capture_api": "latent_capture_v1",
+                    "tensor_dtype": "float32",
+                },
+                downgrade_reasons=[],
+            )
+
+        def capture_sites(self) -> list[str]:
+            return ["post_attn_l16", "post_ffn_l24"]
+
+        def capture(self, layer: int | None = None) -> LatentCapture | None:
+            del layer
+            return LatentCapture(
+                layer=16,
+                site_id="post_attn_l16",
+                vector=np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32),
+                tensors={
+                    "residual_stream": np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
+                    "ffn_gate": np.array([0.5, 0.4, 0.3, 0.2], dtype=np.float32),
+                },
+                metadata={"source": "instrumented_real"},
+            )
+
+        def reinject(self, capture: LatentCapture) -> bool:
+            return bool(capture.vector.size)
+
+        def supports_true_readout(self) -> bool:
+            return True
+
+        def decode_conditioned_preview(self, capture: LatentCapture, max_tokens: int = 16) -> str | None:
+            del max_tokens
+            return f"cond-{float(np.mean(capture.vector)):.2f}"
+
+    backend = LlamaCppBackend(RuntimeConfig(model_path=None, instrumented_backend=True), instrumentation=VerifiedAdapter())
+    state = backend.capture_latent_state(run_id="r-map", basin="narrative", prompt="seed")
+
+    assert state.capture_site == "post_attn_l16"
+    assert state.latent_source == LatentSource.TRUE_TENSOR_CAPTURE
+    assert "residual_stream" in state.auxiliary_vectors
+    assert np.allclose(state.auxiliary_vectors["ffn_gate"], np.array([0.5, 0.4, 0.3, 0.2], dtype=np.float32))
+
+
+def test_true_latent_decode_is_conditioned_by_latent_vector():
+    class ConditionedAdapter:
+        def available(self) -> bool:
+            return True
+
+        def verify_backend_evidence(self) -> InstrumentationVerification:
+            return InstrumentationVerification(
+                verified=True,
+                source="instrumented_real",
+                capture_site_ids=["post_attn_l16"],
+                tensor_shape_metadata={"ndim": 1, "size": 8},
+                verification_metadata={
+                    "backend_variant": "llama.cpp.instrumented",
+                    "instrumentation_commit": "abc123",
+                    "capture_api": "latent_capture_v1",
+                    "tensor_dtype": "float32",
+                },
+                downgrade_reasons=[],
+            )
+
+        def capture_sites(self) -> list[str]:
+            return ["post_attn_l16"]
+
+        def capture(self, layer: int | None = None) -> LatentCapture | None:
+            del layer
+            return LatentCapture(
+                layer=16,
+                site_id="post_attn_l16",
+                vector=np.ones(8, dtype=np.float32),
+                tensors={"ffn_gate": np.ones(8, dtype=np.float32)},
+                metadata={"source": "instrumented_real"},
+            )
+
+        def reinject(self, capture: LatentCapture) -> bool:
+            return bool(capture.vector.size)
+
+        def supports_true_readout(self) -> bool:
+            return True
+
+        def decode_conditioned_preview(self, capture: LatentCapture, max_tokens: int = 16) -> str | None:
+            del max_tokens
+            magnitude = float(np.mean(np.abs(capture.vector)))
+            token = "loud" if magnitude >= 1.0 else "quiet"
+            return f"{token}:{magnitude:.2f}"
+
+    backend = LlamaCppBackend(RuntimeConfig(model_path=None, instrumented_backend=True), instrumentation=ConditionedAdapter())
+    caps = backend.capabilities()
+    assert caps.supports_true_latent_readout
+
+    high = LatentState(
+        run_id="r-high",
+        basin="narrative",
+        mode=DreamMode.TRUE_LATENT_INSTRUMENTED,
+        latent_vector=np.ones(8, dtype=np.float32) * 2.0,
+        capture_site="post_attn_l16",
+        layer_id=16,
+        auxiliary_vectors={"ffn_gate": np.ones(8, dtype=np.float32)},
+    )
+    low = LatentState(
+        run_id="r-low",
+        basin="narrative",
+        mode=DreamMode.TRUE_LATENT_INSTRUMENTED,
+        latent_vector=np.ones(8, dtype=np.float32) * 0.1,
+        capture_site="post_attn_l16",
+        layer_id=16,
+        auxiliary_vectors={"ffn_gate": np.ones(8, dtype=np.float32)},
+    )
+
+    high_text = backend.decode_true_latent_readout_preview(high, max_tokens=8)
+    low_text = backend.decode_true_latent_readout_preview(low, max_tokens=8)
+
+    assert high_text != low_text
+    assert high_text.startswith("loud:")
+    assert low_text.startswith("quiet:")

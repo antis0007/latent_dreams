@@ -5,11 +5,15 @@ from typing import Protocol
 
 import numpy as np
 
+DOCUMENTED_CAPTURE_SITES = ["post_attn_l16", "post_ffn_l24"]
+
 
 @dataclass
 class LatentCapture:
     layer: int
+    site_id: str
     vector: np.ndarray
+    tensors: dict[str, np.ndarray]
     metadata: dict
 
 
@@ -27,6 +31,8 @@ class InstrumentationVerification:
 class InstrumentationAdapter(Protocol):
     def available(self) -> bool: ...
 
+    def bind_backend(self, backend: object | None) -> None: ...
+
     def verify_backend_evidence(self) -> InstrumentationVerification: ...
 
     def capture_sites(self) -> list[str]: ...
@@ -35,10 +41,17 @@ class InstrumentationAdapter(Protocol):
 
     def reinject(self, capture: LatentCapture) -> bool: ...
 
+    def supports_true_readout(self) -> bool: ...
+
+    def decode_conditioned_preview(self, capture: LatentCapture, max_tokens: int = 16) -> str | None: ...
+
 
 class BaselineNoopInstrumentation:
     def available(self) -> bool:
         return False
+
+    def bind_backend(self, backend: object | None) -> None:
+        del backend
 
     def verify_backend_evidence(self) -> InstrumentationVerification:
         return InstrumentationVerification(
@@ -60,16 +73,27 @@ class BaselineNoopInstrumentation:
     def reinject(self, capture: LatentCapture) -> bool:
         return False
 
+    def supports_true_readout(self) -> bool:
+        return False
+
+    def decode_conditioned_preview(self, capture: LatentCapture, max_tokens: int = 16) -> None:
+        del capture, max_tokens
+        return None
+
 
 class ExperimentalLlamaForkAdapter:
     """Scaffold for a custom llama.cpp fork with latent capture/reinjection hooks."""
 
     def __init__(self, enabled: bool = False, sites: list[str] | None = None):
         self.enabled = enabled
-        self._sites = sites or ["post_attn_l16", "post_ffn_l24"]
+        self._sites = sites or list(DOCUMENTED_CAPTURE_SITES)
+        self._backend: object | None = None
 
     def available(self) -> bool:
         return self.enabled
+
+    def bind_backend(self, backend: object | None) -> None:
+        self._backend = backend
 
     def verify_backend_evidence(self) -> InstrumentationVerification:
         if not self.enabled:
@@ -93,7 +117,7 @@ class ExperimentalLlamaForkAdapter:
                 downgrade_reasons=["instrumented_capture_missing"],
                 warning="Instrumented adapter returned no capture during verification.",
             )
-        capture_site_id = f"layer_{capture.layer}"
+        capture_site_id = capture.site_id
         tensor_shape_metadata = {
             "ndim": int(capture.vector.ndim),
             "size": int(capture.vector.size),
@@ -138,12 +162,22 @@ class ExperimentalLlamaForkAdapter:
     def capture(self, layer: int | None = None) -> LatentCapture | None:
         if not self.enabled:
             return None
+        backend_capture = self._capture_from_bound_backend(layer)
+        if backend_capture is not None:
+            return backend_capture
         chosen = int(layer) if layer is not None else 16
+        site_id = self._sites[0] if self._sites else f"layer_{chosen}"
         rng = np.random.default_rng(chosen)
         vec = rng.normal(size=256).astype(np.float32)
+        tensors = {
+            "residual_stream": vec.copy(),
+            "ffn_gate": rng.normal(size=256).astype(np.float32),
+        }
         return LatentCapture(
             layer=chosen,
+            site_id=site_id,
             vector=vec,
+            tensors=tensors,
             metadata={
                 "source": "instrumented_stub",
                 "backend_variant": "llama.cpp.experimental.stub",
@@ -154,3 +188,68 @@ class ExperimentalLlamaForkAdapter:
 
     def reinject(self, capture: LatentCapture) -> bool:
         return self.enabled and capture.vector.size > 0
+
+    def supports_true_readout(self) -> bool:
+        if not self.enabled:
+            return False
+        return self._backend is not None and any(
+            hasattr(self._backend, attr) for attr in ("decode_from_latent", "decode_conditioned_latent")
+        )
+
+    def decode_conditioned_preview(self, capture: LatentCapture, max_tokens: int = 16) -> str | None:
+        if not self.enabled:
+            return None
+        if self._backend is not None:
+            if hasattr(self._backend, "decode_from_latent"):
+                return str(self._backend.decode_from_latent(capture.vector, capture.tensors, max_tokens=max_tokens))
+            if hasattr(self._backend, "decode_conditioned_latent"):
+                return str(
+                    self._backend.decode_conditioned_latent(
+                        vector=capture.vector,
+                        tensors=capture.tensors,
+                        max_tokens=max_tokens,
+                    )
+                )
+        energy = float(np.mean(np.abs(capture.vector)))
+        gate = float(np.mean(np.abs(capture.tensors.get("ffn_gate", np.zeros_like(capture.vector)))))
+        spectral = float(np.mean(np.abs(np.fft.rfft(capture.vector))[:8]))
+        palette = (
+            ["shimmer", "chorus", "velvet", "lattice", "horizon", "drift"]
+            if (energy + gate) >= 1.1
+            else ["hush", "paper", "faint", "glass", "ember", "echo"]
+        )
+        anchor = "magnetic" if spectral >= 4.0 else "diffuse"
+        count = max(6, min(24, int(max_tokens)))
+        sequence = [palette[(i + int(energy * 10)) % len(palette)] for i in range(count - 1)]
+        sequence.append(anchor)
+        return " ".join(sequence)
+
+    def _capture_from_bound_backend(self, layer: int | None = None) -> LatentCapture | None:
+        if self._backend is None:
+            return None
+        raw = None
+        if hasattr(self._backend, "capture_latent"):
+            raw = self._backend.capture_latent(layer=layer, sites=self._sites)
+        elif hasattr(self._backend, "latent_capture"):
+            raw = self._backend.latent_capture(layer=layer, sites=self._sites)
+        if not isinstance(raw, dict):
+            return None
+
+        vector = raw.get("latent_vector", raw.get("vector"))
+        if vector is None:
+            return None
+        tensor_map: dict[str, np.ndarray] = {}
+        for key, value in dict(raw.get("tensors", {})).items():
+            arr = np.asarray(value, dtype=np.float32)
+            if arr.size:
+                tensor_map[str(key)] = arr
+        layer_id = int(raw.get("layer", layer if layer is not None else 16))
+        site_id = str(raw.get("site_id", self._sites[0] if self._sites else f"layer_{layer_id}"))
+        metadata = dict(raw.get("metadata", {}))
+        return LatentCapture(
+            layer=layer_id,
+            site_id=site_id,
+            vector=np.asarray(vector, dtype=np.float32),
+            tensors=tensor_map,
+            metadata=metadata,
+        )
