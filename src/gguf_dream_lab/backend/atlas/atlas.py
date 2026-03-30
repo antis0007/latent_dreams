@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from threading import RLock
+import time
 
 import joblib
 import numpy as np
@@ -12,6 +14,8 @@ from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 
 from gguf_dream_lab.backend.dream.state import LatentState
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -76,12 +80,20 @@ class LatentAtlas:
     nn: NearestNeighbors | None = None
     cluster_labels: np.ndarray | None = None
     recurrence_distance_threshold: float = 0.75
+    rebuild_append_threshold: int = 8
+    rebuild_interval_seconds: float = 1.0
     _attractor_stats: dict[str, AttractorStats] = field(default_factory=dict, init=False, repr=False, compare=False)
     _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
+    _pending_rebuild_appends: int = field(default=0, init=False, repr=False, compare=False)
+    _last_rebuild_monotonic: float = field(default_factory=time.monotonic, init=False, repr=False, compare=False)
 
     def append_points(self, new_points: list[StatePoint]) -> None:
         with self._lock:
+            if not new_points:
+                return
+            start_idx = len(self.points)
             self.points.extend(new_points)
+            self._project_new_points_temporarily(start_idx=start_idx)
             self._rebuild_attractor_stats()
             self._rebuild_indexes_if_needed()
 
@@ -141,6 +153,7 @@ class LatentAtlas:
             )
             self._update_attractor_metrics(point, timestamp=state.timestamp)
             self.points.append(point)
+            self._project_new_points_temporarily(start_idx=len(self.points) - 1)
             self._rebuild_indexes_if_needed()
             return point
 
@@ -215,29 +228,91 @@ class LatentAtlas:
             point.return_frequency = return_frequency
             point.attractor_strength = self._strength_score(stats)
 
-    def _rebuild_indexes_if_needed(self) -> None:
-        # Keep projection and neighbor index in sync on every append so the UI
-        # never renders newly added points as (0, 0) placeholders between
-        # periodic rebuild windows.
-        self._rebuild_indexes()
+    def _rebuild_indexes_if_needed(self, *, force: bool = False) -> None:
+        self._pending_rebuild_appends += 1
+        now = time.monotonic()
+        projection_stale = self.projection_2d is None or len(self.projection_2d) < len(self.points)
+        clusters_stale = self.cluster_labels is None or len(self.cluster_labels) < len(self.points)
+        missing_indexes = projection_stale or clusters_stale
+        threshold_hit = self._pending_rebuild_appends >= max(1, int(self.rebuild_append_threshold))
+        interval_hit = (now - self._last_rebuild_monotonic) >= max(0.0, float(self.rebuild_interval_seconds))
+        if force or missing_indexes or threshold_hit or interval_hit:
+            self._rebuild_indexes()
+
+    def _project_new_points_temporarily(self, *, start_idx: int) -> None:
+        if start_idx >= len(self.points):
+            return
+        new_count = len(self.points) - start_idx
+        if self.projection_2d is None or len(self.projection_2d) < start_idx or start_idx == 0:
+            fresh = np.zeros((len(self.points), 2), dtype=float)
+            if self.projection_2d is not None:
+                upto = min(start_idx, len(self.projection_2d))
+                fresh[:upto] = self.projection_2d[:upto]
+            self.projection_2d = fresh
+        else:
+            self.projection_2d = np.vstack([self.projection_2d, np.zeros((new_count, 2), dtype=float)])
+
+        for idx in range(start_idx, len(self.points)):
+            self.projection_2d[idx] = self._temporary_projection_for_index(idx)
+
+        if self.cluster_labels is None or len(self.cluster_labels) < start_idx:
+            labels = np.full((len(self.points),), -1, dtype=int)
+            if self.cluster_labels is not None:
+                upto = min(start_idx, len(self.cluster_labels))
+                labels[:upto] = self.cluster_labels[:upto]
+            self.cluster_labels = labels
+        else:
+            self.cluster_labels = np.concatenate([self.cluster_labels, np.full((new_count,), -1, dtype=int)])
+
+    def _temporary_projection_for_index(self, index: int) -> np.ndarray:
+        if index <= 0 or self.projection_2d is None:
+            return np.zeros((2,), dtype=float)
+        anchor_count = min(index, len(self.projection_2d))
+        if anchor_count <= 0:
+            return np.zeros((2,), dtype=float)
+        anchors = np.stack([p.embedding for p in self.points[:anchor_count]], axis=0)
+        query = self.points[index].embedding.reshape(1, -1)
+        dists = np.linalg.norm(anchors - query, axis=1)
+        nearest = int(np.argmin(dists))
+        base_xy = self.projection_2d[nearest]
+        radius = min(float(dists[nearest]), 1.0) * 0.05
+        angle = ((index * 37) % 360) * (np.pi / 180.0)
+        jitter = np.array([np.cos(angle), np.sin(angle)], dtype=float) * radius
+        return base_xy + jitter
 
     def _rebuild_indexes(self) -> None:
+        rebuild_start = time.perf_counter()
         if not self.points:
             self.projection_2d = None
             self.nn = None
             self.cluster_labels = None
+            self._pending_rebuild_appends = 0
+            self._last_rebuild_monotonic = time.monotonic()
             return
         mat = np.stack([p.embedding for p in self.points], axis=0)
         if len(self.points) < 2:
             self.projection_2d = np.zeros((len(self.points), 2), dtype=float)
             self.nn = None
             self.cluster_labels = np.zeros((len(self.points),), dtype=int)
+            self._pending_rebuild_appends = 0
+            self._last_rebuild_monotonic = time.monotonic()
+            elapsed_ms = (time.perf_counter() - rebuild_start) * 1000.0
+            logger.info("atlas index rebuild completed: points=%d elapsed_ms=%.3f clusters=%d", len(self.points), elapsed_ms, 1)
             return
         pca = PCA(n_components=2)
         self.projection_2d = pca.fit_transform(mat)
         self.nn = NearestNeighbors(n_neighbors=min(8, len(self.points))).fit(mat)
         n_clusters = min(max(2, len(self.points) // 20), 12)
         self.cluster_labels = MiniBatchKMeans(n_clusters=n_clusters, n_init="auto", random_state=0).fit_predict(mat)
+        self._pending_rebuild_appends = 0
+        self._last_rebuild_monotonic = time.monotonic()
+        elapsed_ms = (time.perf_counter() - rebuild_start) * 1000.0
+        logger.info(
+            "atlas index rebuild completed: points=%d elapsed_ms=%.3f clusters=%d",
+            len(self.points),
+            elapsed_ms,
+            n_clusters,
+        )
 
     def neighbors(self, index: int, k: int = 6) -> list[int]:
         with self._lock:
