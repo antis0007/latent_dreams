@@ -124,8 +124,15 @@ input[type="text"]::placeholder,
 .Select-option,
 .Select input,
 .Select span,
+.Select-value,
+.Select-value span,
+.Select-value-label span,
+.VirtualizedSelectOption,
 .Select__single-value,
-.Select__option {
+.Select__option,
+.Select__input-container,
+.Select__value-container,
+.Select__indicator {
   color: var(--text) !important;
 }
 
@@ -206,7 +213,11 @@ input[type="text"]::placeholder,
 
 .follow-latest-toggle {
   margin-top: 0.75rem;
-  color: var(--text-muted);
+  color: var(--text);
+}
+
+.follow-latest-toggle label {
+  color: var(--text) !important;
 }
 
 .rc-slider-track {
@@ -220,4 +231,10 @@ input[type="text"]::placeholder,
 .rc-slider-handle {
   border: 2px solid var(--accent) !important;
   background-color: var(--panel);
+}
+
+.rc-slider-mark-text,
+.rc-slider-dot,
+.rc-slider-step {
+  color: var(--text-muted) !important;
 }

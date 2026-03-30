@@ -14,3 +14,9 @@ def test_commit_gate_on_stability_window():
 
     assert DreamController._should_commit(0.7, stable, _Cfg())
     assert not DreamController._should_commit(0.7, unstable, _Cfg())
+
+
+def test_commit_gate_rejects_empty_history():
+    emptyish = deque(["", " ", ""], maxlen=3)
+
+    assert not DreamController._should_commit(0.8, emptyish, _Cfg())

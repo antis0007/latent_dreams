@@ -720,8 +720,10 @@ class DreamController:
         if coherence < cfg.coherence_threshold or len(history) < cfg.stability_window:
             return False
         last = list(history)[-cfg.stability_window :]
+        if not any(chunk.strip() for chunk in last):
+            return False
         unique = len(set(last))
-        return unique <= max(2, cfg.stability_window // 2)
+        return unique <= max(2, cfg.stability_window - 1)
 
     @staticmethod
     def _merge_committed_chunk(current_committed: str, chunk: str, max_len: int) -> str:

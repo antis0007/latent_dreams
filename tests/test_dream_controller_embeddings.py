@@ -55,12 +55,16 @@ def test_estimate_local_density_returns_zero_for_shape_mismatch():
 
 def test_should_commit_requires_threshold_and_stability_window():
     history = deque(["a b", "a b", "a b", "a b"], maxlen=4)
+    near_stable = deque(["a b", "a b", "a c", "a b"], maxlen=4)
+    unstable = deque(["a b", "x y", "m n", "q r"], maxlen=4)
 
     class _Cfg:
         coherence_threshold = 0.6
         stability_window = 4
 
     assert DreamController._should_commit(0.7, history, _Cfg())
+    assert DreamController._should_commit(0.7, near_stable, _Cfg())
+    assert not DreamController._should_commit(0.7, unstable, _Cfg())
     assert not DreamController._should_commit(0.3, history, _Cfg())
 
 
