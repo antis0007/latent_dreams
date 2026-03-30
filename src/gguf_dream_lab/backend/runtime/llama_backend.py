@@ -83,6 +83,9 @@ class LlamaCppBackend(RuntimeBackend):
                 raise error_holder[0]
             else:
                 self._llm = holder.get("llm")
+                bind_backend = getattr(self.instrumentation, "bind_backend", None)
+                if callable(bind_backend):
+                    bind_backend(self._llm)
                 logger.info("Loaded GGUF model: %s", model_path)
         except Exception as exc:  # graceful degradation path
             self._llama_error = f"Failed to initialize llama-cpp-python: {exc}"
@@ -100,6 +103,7 @@ class LlamaCppBackend(RuntimeBackend):
         verification: InstrumentationVerification = self.instrumentation.verify_backend_evidence()
         verification_reasons = list(verification.downgrade_reasons)
         supports_true = self.instrumentation.available() and verification.verified
+        supports_true_readout = supports_true and self._instrumentation_supports_true_readout()
         if self.instrumentation.available() and not verification.verified and not verification_reasons:
             verification_reasons.append("instrumentation_verification_failed")
         if verification.warning:
@@ -133,7 +137,7 @@ class LlamaCppBackend(RuntimeBackend):
             supports_logits_all=self.config.logits_all,
             supports_streaming=True,
             supports_instrumented_latents=supports_true,
-            supports_true_latent_readout=False,
+            supports_true_latent_readout=supports_true_readout,
             backend_name="llama.cpp (via llama-cpp-python)" if self._llm else "synthetic-fallback",
             warnings=warnings,
             capture_sites=capture_sites,
@@ -233,7 +237,15 @@ class LlamaCppBackend(RuntimeBackend):
         rng = np.random.default_rng(noise_seed)
         proposal = proposal + rng.normal(scale=noise_scale, size=proposal.shape).astype(np.float32)
         if state.mode == DreamMode.TRUE_LATENT_INSTRUMENTED:
-            injected = self.instrumentation.reinject(LatentCapture(layer=state.layer_id or 0, vector=proposal, metadata={}))
+            injected = self.instrumentation.reinject(
+                LatentCapture(
+                    layer=state.layer_id or 0,
+                    site_id=state.capture_site,
+                    vector=proposal,
+                    tensors={k: np.asarray(v, dtype=np.float32) for k, v in state.auxiliary_vectors.items()},
+                    metadata={},
+                )
+            )
             state.metadata["reinject_ok"] = injected
         return state.clone_with_vector(proposal)
 
@@ -294,8 +306,19 @@ class LlamaCppBackend(RuntimeBackend):
         return " ".join(rng.choice(lex, size=count, replace=True).tolist())
 
     def decode_true_latent_readout_preview(self, state: LatentState, max_tokens: int = 16) -> str:
-        # Reserved for instrumented latent-to-token readout once backend hooks expose
-        # a true decode path. Until then we deliberately route to prompt-conditioned synthesis.
+        capture = LatentCapture(
+            layer=state.layer_id or 0,
+            site_id=state.capture_site,
+            vector=np.asarray(state.latent_vector, dtype=np.float32),
+            tensors={k: np.asarray(v, dtype=np.float32) for k, v in state.auxiliary_vectors.items()},
+            metadata=dict(state.metadata),
+        )
+        decode_fn = getattr(self.instrumentation, "decode_conditioned_preview", None)
+        if callable(decode_fn):
+            text = decode_fn(capture, max_tokens=max_tokens)
+            if text:
+                state.metadata["readout_conditioning"] = "instrumented_latent"
+                return text
         return self.decode_approximate_prompt_synthesis_preview(state, max_tokens=max_tokens)
 
     def decode_commit_from_latent(self, state: LatentState, max_tokens: int = 24) -> str:
@@ -381,8 +404,15 @@ class LlamaCppBackend(RuntimeBackend):
             basin=basin,
             mode=mode,
             latent_vector=np.asarray(cap.vector, dtype=np.float32),
-            capture_site=f"layer_{cap.layer}",
+            capture_site=cap.site_id,
             latent_source=LatentSource.TRUE_TENSOR_CAPTURE,
             layer_id=cap.layer,
+            auxiliary_vectors={k: np.asarray(v, dtype=np.float32) for k, v in cap.tensors.items()},
             metadata=dict(cap.metadata),
         )
+
+    def _instrumentation_supports_true_readout(self) -> bool:
+        supports = getattr(self.instrumentation, "supports_true_readout", None)
+        if callable(supports):
+            return bool(supports())
+        return False
