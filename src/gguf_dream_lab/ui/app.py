@@ -220,6 +220,8 @@ def create_dash_app(config: AppConfig) -> Dash:
                             html.Pre(id="summary-stats", className="metrics-block"),
                             html.H4("Selected timestep dream details", className="panel-title"),
                             html.Pre(id="step-detail", className="metrics-block"),
+                            html.H4("Latest state window", className="panel-title"),
+                            html.Pre(id="state-window", className="metrics-block"),
                             html.H4("Metrics legend", className="panel-title"),
                             html.Div(
                                 className="meta-line",
@@ -412,22 +414,22 @@ def create_dash_app(config: AppConfig) -> Dash:
         selected = [rid for rid in (current_filter or []) if rid in available]
         latest_run_id = str(frame["run_id"].iloc[-1])
         previous_latest = (ui_state or {}).get("latest_run_id")
+        auto_follow = "follow" in (follow_latest or [])
 
         if trigger == "select-all-runs-btn":
             selected = [o["value"] for o in options]
         elif trigger == "clear-selection-btn":
             selected = []
         elif not selected:
-            selected = [o["value"] for o in options]
-
-        if latest_run_id != previous_latest and latest_run_id not in selected:
+            # Do not force-load every run by default; keep the graph focused.
+            selected = [latest_run_id]
+        elif auto_follow and trigger in {"ticker", "start-btn", "follow-latest"} and latest_run_id not in selected:
             selected = selected + [latest_run_id]
 
         filtered = frame[frame["run_id"].isin(selected)] if selected else frame.iloc[0:0]
         scrub_max = int(filtered["step_idx"].max()) if not filtered.empty else 1
         current_scrub = int(scrub_step or 0)
-        auto_follow = "follow" in (follow_latest or [])
-        if auto_follow or latest_run_id != previous_latest:
+        if auto_follow:
             next_scrub = scrub_max
         else:
             next_scrub = max(0, min(current_scrub, scrub_max))
@@ -564,6 +566,7 @@ def create_dash_app(config: AppConfig) -> Dash:
         Output("basin-filter", "value"),
         Output("summary-stats", "children"),
         Output("step-detail", "children"),
+        Output("state-window", "children"),
         Input("ticker", "n_intervals"),
         Input("scrub-step", "value"),
         Input("run-filter", "value"),
@@ -581,7 +584,22 @@ def create_dash_app(config: AppConfig) -> Dash:
             fig.update_layout(template=plotly_template, uirevision="latent-atlas")
             metrics_fig = go.Figure()
             metrics_fig.update_layout(template=plotly_template, title="Rolling metrics")
-            return "", "", "No ticks yet.", fig, "No step selected.", "", metrics_fig, [], [], [], [], "No summary stats yet.", "No timestep details yet."
+            return (
+                "",
+                "",
+                "No ticks yet.",
+                fig,
+                "No step selected.",
+                "",
+                metrics_fig,
+                [],
+                [],
+                [],
+                [],
+                "No summary stats yet.",
+                "No timestep details yet.",
+                "No state window yet.",
+            )
 
         if run_filter:
             frame = frame[frame["run_id"].isin(run_filter)]
@@ -614,6 +632,7 @@ def create_dash_app(config: AppConfig) -> Dash:
                 selected_basins,
                 "No summary stats for current filters.",
                 "No timestep details for current filters.",
+                "No state window for current filters.",
             )
 
         metric_frames = []
@@ -873,6 +892,24 @@ def create_dash_app(config: AppConfig) -> Dash:
         summary_table = _summarize_metrics(metrics_frame)
         summary_txt = summary_table.to_string(index=False, float_format=lambda v: f"{v:.4f}") if not summary_table.empty else "No summary stats yet."
         detail_txt = json.dumps(step_detail_payload, indent=2)
+        state_cols = [
+            "run_label",
+            "run_id",
+            "step_idx",
+            "phase",
+            "mode",
+            "coherence",
+            "density",
+            "entropy",
+            "latent_source",
+        ]
+        available_state_cols = [col for col in state_cols if col in traj.columns]
+        state_window = (
+            traj[available_state_cols]
+            .sort_values(["run_id", "step_idx"])
+            .tail(20)
+            .to_string(index=False, float_format=lambda v: f"{v:.4f}")
+        )
         return (
             preview_text,
             committed_text,
@@ -887,6 +924,7 @@ def create_dash_app(config: AppConfig) -> Dash:
             selected_basins,
             summary_txt,
             detail_txt,
+            state_window,
         )
 
     @app.callback(
