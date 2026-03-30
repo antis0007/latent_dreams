@@ -56,6 +56,9 @@ class DreamConfig(BaseModel):
     max_preview_len: int = 220
     max_committed_len: int = 2000
     branch_count: int = 1
+    basin_force_weight: float = Field(default=0.2, ge=0.0, le=1.0)
+    basin_retention: float = Field(default=0.65, ge=0.0, le=1.0)
+    basin_drift: float = Field(default=0.1, ge=0.0, le=1.0)
     preview_decode_cadence: int = 1
     stability_window: int = 4
     run_label: str = "default"

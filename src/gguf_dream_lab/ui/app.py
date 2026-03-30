@@ -426,7 +426,21 @@ def create_dash_app(config: AppConfig) -> Dash:
             color="coherence",
             symbol="run_label",
             custom_data=["step_idx"],
-            hover_data=["state_id", "run_label", "run_id", "basin", "step_idx", "latent_source", "preview", "committed", "density", "entropy"],
+            hover_data=[
+                "state_id",
+                "run_label",
+                "run_id",
+                "basin",
+                "step_idx",
+                "latent_source",
+                "preview",
+                "committed",
+                "density",
+                "entropy",
+                "basin_sample_count",
+                "basin_force_magnitude",
+                "basin_prior_spread",
+            ],
         )
         for run_id, run_traj in traj.groupby("run_id"):
             fig.add_scatter(
@@ -465,7 +479,10 @@ def create_dash_app(config: AppConfig) -> Dash:
                 f"latent_source={row.get('latent_source', 'unknown')}\n"
                 f"coherence={float(row['coherence']):.3f}\n"
                 f"entropy={float(row['entropy']):.3f}\n"
-                f"density={float(row['density']):.3f}"
+                f"density={float(row['density']):.3f}\n"
+                f"basin_samples={int(row.get('basin_sample_count', 0))}\n"
+                f"basin_force={float(row.get('basin_force_magnitude', 0.0)):.3f}\n"
+                f"basin_spread={float(row.get('basin_prior_spread', 0.0)):.3f}"
             )
 
         if tick is not None and selected_step == max_step:
@@ -477,7 +494,12 @@ def create_dash_app(config: AppConfig) -> Dash:
                 f"coherence={tick.coherence:.3f}\n"
                 f"entropy={tick.entropy:.3f}\n"
                 f"density={tick.local_density:.3f}\n"
-                f"stability={tick.token_stability:.3f}"
+                f"stability={tick.token_stability:.3f}\n"
+                f"basin_samples={tick.basin_sample_count}\n"
+                f"basin_mean_coherence={tick.basin_mean_coherence:.3f}\n"
+                f"basin_mean_density={tick.basin_mean_density:.3f}\n"
+                f"basin_force={tick.basin_force_magnitude:.3f}\n"
+                f"basin_spread={tick.basin_prior_spread:.3f}"
             )
 
         if timeline_ticks:
@@ -491,6 +513,9 @@ def create_dash_app(config: AppConfig) -> Dash:
                     f"parent_state={replay_row.get('parent_state_id', '')}\n"
                     f"branch_id={replay_row.get('branch_id', '')}\n"
                     f"branch_score={float(replay_row.get('branch_score', 0.0)):.3f}\n"
+                    f"basin_samples={int(replay_row.get('basin_sample_count', 0))}\n"
+                    f"basin_force={float(replay_row.get('basin_force_magnitude', 0.0)):.3f}\n"
+                    f"basin_spread={float(replay_row.get('basin_prior_spread', 0.0)):.3f}\n"
                     f"candidate_scores={replay_row.get('candidate_scores', '[]')}\n"
                     f"decode_path_diagnostics={replay_row.get('decode_provenance', 'unknown')}"
                 )
