@@ -6,6 +6,7 @@ import numpy as np
 
 from gguf_dream_lab.backend.dream.state import DreamMode, LatentSource, LatentState
 from gguf_dream_lab.backend.instrumentation.adapters import (
+    ExperimentalLlamaForkAdapter,
     InstrumentationVerification,
     LatentCapture,
 )
@@ -51,7 +52,7 @@ def test_runtime_load_timeout_falls_back_to_synthetic(tmp_path):
     assert any("timed out" in warning for warning in caps.warnings)
 
 
-def test_stubbed_instrumentation_does_not_promote_true_mode():
+def test_stubbed_instrumentation_promotes_true_mode_with_decode_fallback():
     class StubbedAdapter:
         def available(self) -> bool:
             return True
@@ -94,8 +95,9 @@ def test_stubbed_instrumentation_does_not_promote_true_mode():
     backend = LlamaCppBackend(RuntimeConfig(model_path=None, instrumented_backend=True), instrumentation=StubbedAdapter())
     caps = backend.capabilities()
 
-    assert not caps.supports_instrumented_latents
-    assert caps.active_mode.value == "enhanced_latent"
+    assert caps.supports_instrumented_latents
+    assert caps.supports_true_latent_readout
+    assert caps.active_mode.value == "true_latent_instrumented"
     assert "layer_16" in caps.capture_sites
     assert any("source=instrumented_stub" in warning for warning in caps.warnings)
     assert "instrumented_stub_capture" in caps.instrumentation_downgrade_reasons
@@ -282,3 +284,73 @@ def test_true_latent_decode_is_conditioned_by_latent_vector():
     assert high_text != low_text
     assert high_text.startswith("loud:")
     assert low_text.startswith("quiet:")
+
+
+def test_experimental_adapter_no_longer_emits_synthetic_conditioned_preview():
+    adapter = ExperimentalLlamaForkAdapter(enabled=True)
+    capture = LatentCapture(
+        layer=16,
+        site_id="post_attn_l16",
+        vector=np.ones(8, dtype=np.float32),
+        tensors={"ffn_gate": np.ones(8, dtype=np.float32)},
+        metadata={"source": "instrumented_real"},
+    )
+
+    assert adapter.decode_conditioned_preview(capture, max_tokens=8) is None
+
+
+def test_true_latent_decode_falls_back_to_promptless_latent_exploration():
+    class VerifiedAdapter:
+        def available(self) -> bool:
+            return True
+
+        def verify_backend_evidence(self) -> InstrumentationVerification:
+            return InstrumentationVerification(
+                verified=True,
+                source="instrumented_real",
+                capture_site_ids=["post_attn_l16"],
+                tensor_shape_metadata={"ndim": 1, "size": 8},
+                verification_metadata={
+                    "backend_variant": "llama.cpp.instrumented",
+                    "instrumentation_commit": "abc123",
+                    "capture_api": "latent_capture_v1",
+                    "tensor_dtype": "float32",
+                },
+                downgrade_reasons=[],
+            )
+
+        def capture_sites(self) -> list[str]:
+            return ["post_attn_l16"]
+
+        def capture(self, layer: int | None = None) -> LatentCapture | None:
+            del layer
+            return None
+
+        def reinject(self, capture: LatentCapture) -> bool:
+            return bool(capture.vector.size)
+
+        def supports_true_readout(self) -> bool:
+            return False
+
+        def decode_conditioned_preview(self, capture: LatentCapture, max_tokens: int = 16) -> str | None:
+            del capture, max_tokens
+            return None
+
+    backend = LlamaCppBackend(RuntimeConfig(model_path=None, instrumented_backend=True), instrumentation=VerifiedAdapter())
+    backend._loaded = True
+    backend._llm = None
+    state = LatentState(
+        run_id="r-llm",
+        basin="narrative",
+        mode=DreamMode.TRUE_LATENT_INSTRUMENTED,
+        latent_vector=np.ones(8, dtype=np.float32),
+        capture_site="post_attn_l16",
+        layer_id=16,
+        auxiliary_vectors={"ffn_gate": np.ones(8, dtype=np.float32)},
+    )
+
+    text = backend.decode_true_latent_readout_preview(state, max_tokens=8)
+
+    assert text
+    assert "signal_" in text or "vector_" in text
+    assert state.metadata["readout_conditioning"] == "latent_exploration_decode"

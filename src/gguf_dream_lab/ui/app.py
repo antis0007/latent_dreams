@@ -519,7 +519,7 @@ def create_dash_app(config: AppConfig) -> Dash:
         decode_lane = (
             "true_latent_readout"
             if caps.supports_instrumented_latents and caps.supports_true_latent_readout
-            else "approximate_prompt_synthesis"
+            else "true_latent_readout_unavailable"
         )
         return (
             f"Mode: {contract.effective_mode.value} | backend: {caps.backend_name} "
@@ -534,7 +534,7 @@ def create_dash_app(config: AppConfig) -> Dash:
         caps = runtime.capabilities()
         if caps.supports_instrumented_latents and caps.supports_true_latent_readout:
             return "Preview (true latent readout)"
-        return "Preview (approximate prompt synthesis)"
+        return "Preview (unavailable: true latent readout required)"
 
     @app.callback(
         Output("scrub-step", "value"),

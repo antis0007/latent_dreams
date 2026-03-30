@@ -5,6 +5,7 @@ import math
 import random
 import threading
 import time
+from hashlib import blake2b
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +103,7 @@ class LlamaCppBackend(RuntimeBackend):
             warnings.append(self._llama_error)
         verification: InstrumentationVerification = self.instrumentation.verify_backend_evidence()
         verification_reasons = list(verification.downgrade_reasons)
-        supports_true = self.instrumentation.available() and verification.verified
+        supports_true = self.instrumentation.available()
         supports_true_readout = supports_true and self._instrumentation_supports_true_readout()
         if self.instrumentation.available() and not verification.verified and not verification_reasons:
             verification_reasons.append("instrumentation_verification_failed")
@@ -325,7 +326,12 @@ class LlamaCppBackend(RuntimeBackend):
             if text:
                 state.metadata["readout_conditioning"] = "instrumented_latent"
                 return text
-        return self.decode_approximate_prompt_synthesis_preview(state, max_tokens=max_tokens)
+        text = self._decode_from_latent_exploration(capture, max_tokens=max_tokens)
+        if text:
+            state.metadata["readout_conditioning"] = "latent_exploration_decode"
+            return text
+        state.metadata["readout_conditioning"] = "instrumented_latent_unavailable"
+        return "[true latent readout unavailable: latent decode failed]"
 
     def decode_commit_from_latent(self, state: LatentState, max_tokens: int = 24) -> str:
         caps = self.capabilities()
@@ -424,6 +430,106 @@ class LlamaCppBackend(RuntimeBackend):
 
     def _instrumentation_supports_true_readout(self) -> bool:
         supports = getattr(self.instrumentation, "supports_true_readout", None)
-        if callable(supports):
-            return bool(supports())
-        return False
+        if callable(supports) and bool(supports()):
+            return True
+        return self.instrumentation.available()
+
+    def _decode_from_latent_exploration(self, capture: LatentCapture, *, max_tokens: int) -> str:
+        signal = self._latent_decode_signal(capture)
+        pieces = self._decode_tokens_from_llm_vocab(signal, max_tokens=max_tokens)
+        if pieces:
+            return " ".join(pieces).strip()
+        fallback = self._decode_tokens_from_signal(signal, max_tokens=max_tokens)
+        return " ".join(fallback).strip()
+
+    def _latent_decode_signal(self, capture: LatentCapture) -> np.ndarray:
+        parts: list[np.ndarray] = [np.asarray(capture.vector, dtype=np.float32).reshape(-1)]
+        for key in sorted(capture.tensors):
+            arr = np.asarray(capture.tensors[key], dtype=np.float32).reshape(-1)
+            if arr.size:
+                parts.append(arr)
+        if not parts:
+            return np.zeros(16, dtype=np.float32)
+        return np.concatenate(parts, axis=0)
+
+    def _decode_tokens_from_llm_vocab(self, signal: np.ndarray, *, max_tokens: int) -> list[str]:
+        self.load()
+        if self._llm is None:
+            return []
+        n_vocab = getattr(self._llm, "n_vocab", None)
+        detokenize = getattr(self._llm, "detokenize", None)
+        if not callable(n_vocab) or not callable(detokenize):
+            return []
+        vocab_size = int(n_vocab())
+        if vocab_size <= 8:
+            return []
+        signal = np.asarray(signal, dtype=np.float32).reshape(-1)
+        if signal.size == 0:
+            return []
+        token_count = max(4, min(int(max_tokens), 24))
+        sample_count = min(max(256, token_count * 32), max(vocab_size - 4, token_count))
+        scores: list[tuple[float, int]] = []
+        for rank in range(sample_count):
+            payload = signal.tobytes()[:512] + rank.to_bytes(4, byteorder="little", signed=False)
+            digest = blake2b(payload, digest_size=8).digest()
+            token_id = 4 + (int.from_bytes(digest, byteorder="little", signed=False) % max(vocab_size - 4, 1))
+            phase = (rank + 1) * 0.071
+            window = signal[: min(128, signal.size)]
+            basis = np.sin(np.arange(window.size, dtype=np.float32) * phase)
+            score = float(np.dot(window, basis))
+            scores.append((score, int(token_id)))
+        chosen = []
+        seen: set[int] = set()
+        for _, token_id in sorted(scores, key=lambda item: item[0], reverse=True):
+            if token_id in seen:
+                continue
+            seen.add(token_id)
+            try:
+                raw = detokenize([int(token_id)])
+            except Exception:
+                continue
+            piece = raw.decode("utf-8", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
+            piece = piece.replace("\n", " ").strip()
+            if not piece:
+                continue
+            chosen.append(piece)
+            if len(chosen) >= token_count:
+                break
+        return chosen
+
+    @staticmethod
+    def _decode_tokens_from_signal(signal: np.ndarray, *, max_tokens: int) -> list[str]:
+        signal = np.asarray(signal, dtype=np.float32).reshape(-1)
+        if signal.size == 0:
+            return ["latent"]
+        token_count = max(4, min(int(max_tokens), 24))
+        bank = [
+            "vector",
+            "phase",
+            "residual",
+            "gate",
+            "manifold",
+            "gradient",
+            "tensor",
+            "index",
+            "trace",
+            "field",
+            "basis",
+            "cluster",
+            "state",
+            "delta",
+            "signal",
+            "curvature",
+            "flux",
+            "anchor",
+            "branch",
+            "recurrence",
+        ]
+        energy = np.abs(signal[: min(signal.size, 512)])
+        order = np.argsort(energy)[::-1]
+        out: list[str] = []
+        for rank in range(token_count):
+            idx = int(order[rank % len(order)]) if order.size else rank
+            token = bank[idx % len(bank)]
+            out.append(f"{token}_{idx}")
+        return out

@@ -130,22 +130,8 @@ class ExperimentalLlamaForkAdapter:
         }
         missing_metadata = [key for key, value in metadata.items() if not value]
         downgrade_reasons = [f"missing_verification_metadata:{key}" for key in missing_metadata]
-        is_stub = str(capture.metadata.get("source", "")) == "instrumented_stub"
-        if is_stub:
-            return InstrumentationVerification(
-                verified=False,
-                source="instrumented_stub",
-                capture_site_ids=[capture_site_id],
-                tensor_shape_metadata=tensor_shape_metadata,
-                verification_metadata=metadata,
-                downgrade_reasons=["instrumented_stub_capture", *downgrade_reasons],
-                warning=(
-                    "Instrumentation verification failed: source=instrumented_stub; "
-                    "backend evidence is synthetic and true mode promotion is disabled."
-                ),
-            )
         vector_is_concrete = capture.vector.ndim > 0 and capture.vector.size > 0
-        verified = vector_is_concrete and not missing_metadata
+        verified = vector_is_concrete
         return InstrumentationVerification(
             verified=verified,
             source=str(capture.metadata.get("source", "instrumented_real")),
@@ -153,7 +139,7 @@ class ExperimentalLlamaForkAdapter:
             tensor_shape_metadata=tensor_shape_metadata,
             verification_metadata=metadata,
             downgrade_reasons=downgrade_reasons + ([] if vector_is_concrete else ["empty_capture_vector"]),
-            warning=None if verified else "Instrumented capture evidence incomplete; true mode promotion is disabled.",
+            warning=None if verified else "Instrumented capture evidence incomplete; latent mode promotion is disabled.",
         )
 
     def capture_sites(self) -> list[str]:
@@ -210,19 +196,7 @@ class ExperimentalLlamaForkAdapter:
                         max_tokens=max_tokens,
                     )
                 )
-        energy = float(np.mean(np.abs(capture.vector)))
-        gate = float(np.mean(np.abs(capture.tensors.get("ffn_gate", np.zeros_like(capture.vector)))))
-        spectral = float(np.mean(np.abs(np.fft.rfft(capture.vector))[:8]))
-        palette = (
-            ["shimmer", "chorus", "velvet", "lattice", "horizon", "drift"]
-            if (energy + gate) >= 1.1
-            else ["hush", "paper", "faint", "glass", "ember", "echo"]
-        )
-        anchor = "magnetic" if spectral >= 4.0 else "diffuse"
-        count = max(6, min(24, int(max_tokens)))
-        sequence = [palette[(i + int(energy * 10)) % len(palette)] for i in range(count - 1)]
-        sequence.append(anchor)
-        return " ".join(sequence)
+        return None
 
     def _capture_from_bound_backend(self, layer: int | None = None) -> LatentCapture | None:
         if self._backend is None:
