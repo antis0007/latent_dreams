@@ -165,9 +165,15 @@ class DreamController:
             latent.metadata["branch_selection_policy"] = cfg.branch_selection_policy.value
             latent = self._choose_candidate(candidates, prev_latent=latent)
             candidate_scores = str(latent.metadata.get("candidate_scores", "[]"))
-            preview = self._decode_preview(latent, max_tokens=max(12, cfg.preview_decode_cadence * 16))
-            preview_decode_source = self._preview_decode_source()
-            self.state.preview_text = preview[-cfg.max_preview_len :]
+            should_decode_preview = (
+                self.state.step_idx == 0 or (self.state.step_idx % max(1, int(cfg.preview_decode_cadence)) == 0)
+            )
+            if should_decode_preview:
+                preview = self._decode_preview(latent, max_tokens=max(12, cfg.preview_decode_cadence * 16))
+                preview_decode_source = self._preview_decode_source()
+                self.state.preview_text = preview.strip()
+            else:
+                preview_decode_source = "preview_cache_hold"
             preview_history.append(self.state.preview_text)
             token_stability = self._token_stability(preview_history)
 

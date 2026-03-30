@@ -86,6 +86,7 @@ class LatentAtlas:
     _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
     _pending_rebuild_appends: int = field(default=0, init=False, repr=False, compare=False)
     _last_rebuild_monotonic: float = field(default_factory=time.monotonic, init=False, repr=False, compare=False)
+    _projection_basis: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
 
     def append_points(self, new_points: list[StatePoint]) -> None:
         with self._lock:
@@ -102,6 +103,7 @@ class LatentAtlas:
             self.points = []
             self.edges = []
             self._attractor_stats = {}
+            self._projection_basis = None
             self._rebuild_indexes()
 
     def remove_runs(self, run_ids: set[str]) -> None:
@@ -273,12 +275,23 @@ class LatentAtlas:
         anchors = np.stack([p.embedding for p in self.points[:anchor_count]], axis=0)
         query = self.points[index].embedding.reshape(1, -1)
         dists = np.linalg.norm(anchors - query, axis=1)
-        nearest = int(np.argmin(dists))
-        base_xy = self.projection_2d[nearest]
-        radius = min(float(dists[nearest]), 1.0) * 0.05
-        angle = ((index * 37) % 360) * (np.pi / 180.0)
-        jitter = np.array([np.cos(angle), np.sin(angle)], dtype=float) * radius
-        return base_xy + jitter
+        ordered = np.argsort(dists)[: min(3, len(dists))]
+        local_dists = dists[ordered]
+        inv = 1.0 / (local_dists + 1e-6)
+        weights = inv / (np.sum(inv) + 1e-9)
+        anchor_xy = self.projection_2d[ordered]
+        base_xy = np.sum(anchor_xy * weights.reshape(-1, 1), axis=0)
+        nearest = int(ordered[0])
+        nearest_dist = float(local_dists[0]) if len(local_dists) else 0.0
+        direction = query.reshape(-1) - anchors[nearest]
+        direction_norm = float(np.linalg.norm(direction))
+        if direction_norm > 1e-9:
+            unit = direction / direction_norm
+            # Stable deterministic jitter from latent geometry, not index spiral.
+            angle = float(np.arctan2(unit[1] if unit.size > 1 else 0.0, unit[0]))
+            jitter = np.array([np.cos(angle), np.sin(angle)], dtype=float) * min(nearest_dist, 1.0) * 0.03
+            return base_xy + jitter
+        return base_xy
 
     def _rebuild_indexes(self) -> None:
         rebuild_start = time.perf_counter()
@@ -286,6 +299,7 @@ class LatentAtlas:
             self.projection_2d = None
             self.nn = None
             self.cluster_labels = None
+            self._projection_basis = None
             self._pending_rebuild_appends = 0
             self._last_rebuild_monotonic = time.monotonic()
             return
@@ -300,7 +314,16 @@ class LatentAtlas:
             logger.info("atlas index rebuild completed: points=%d elapsed_ms=%.3f clusters=%d", len(self.points), elapsed_ms, 1)
             return
         pca = PCA(n_components=2)
-        self.projection_2d = pca.fit_transform(mat)
+        components = pca.fit(mat).components_.astype(np.float32)
+        if self._projection_basis is not None and self._projection_basis.shape == components.shape:
+            aligned = components.copy()
+            for axis in range(aligned.shape[0]):
+                if float(np.dot(aligned[axis], self._projection_basis[axis])) < 0.0:
+                    aligned[axis] *= -1.0
+            components = aligned
+        self._projection_basis = components
+        centered = mat - pca.mean_.reshape(1, -1)
+        self.projection_2d = centered @ components.T
         self.nn = NearestNeighbors(n_neighbors=min(8, len(self.points))).fit(mat)
         n_clusters = min(max(2, len(self.points) // 20), 12)
         self.cluster_labels = MiniBatchKMeans(n_clusters=n_clusters, n_init="auto", random_state=0).fit_predict(mat)
