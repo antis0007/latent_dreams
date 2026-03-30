@@ -65,6 +65,8 @@ class DreamConfig(BaseModel):
     branch_selection_policy: BranchSelectionPolicy = BranchSelectionPolicy.GREEDY
     branch_policy_temperature: float = Field(default=0.75, gt=0.0)
     branch_policy_exploration: float = Field(default=0.10, ge=0.0, le=1.0)
+    coherence_gain: float = Field(default=0.35, ge=0.0, le=1.0)
+    exploration_floor: float = Field(default=0.25, ge=0.0, le=1.0)
     basin_force_weight: float = Field(default=0.2, ge=0.0, le=1.0)
     basin_retention: float = Field(default=0.65, ge=0.0, le=1.0)
     basin_drift: float = Field(default=0.1, ge=0.0, le=1.0)

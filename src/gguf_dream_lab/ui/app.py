@@ -67,6 +67,8 @@ def _summarize_metrics(frame: pd.DataFrame) -> pd.DataFrame:
             branch_divergence_mean=("branch_divergence", "mean"),
             phase_duration_mean=("phase_duration", "mean"),
             phase_duration_max=("phase_duration", "max"),
+            adaptive_noise_mean=("adaptive_noise", "mean"),
+            adaptive_attractor_weight_mean=("adaptive_attractor_weight", "mean"),
         )
         .reset_index()
         .sort_values(["run_id", "mode", "basin"])
@@ -120,6 +122,30 @@ def create_dash_app(config: AppConfig) -> Dash:
                             dcc.Slider(id="threshold", min=0.3, max=0.95, step=0.01, value=config.dream.coherence_threshold),
                             html.Label("Noise amplitude", className="control-label"),
                             dcc.Slider(id="noise", min=0.01, max=0.6, step=0.01, value=config.dream.noise_amplitude),
+                            html.Label("Coherence gain", className="control-label"),
+                            dcc.Slider(
+                                id="coherence-gain",
+                                min=0.0,
+                                max=1.0,
+                                step=0.01,
+                                value=config.dream.coherence_gain,
+                            ),
+                            html.Label("Exploration floor", className="control-label"),
+                            dcc.Slider(
+                                id="exploration-floor",
+                                min=0.05,
+                                max=0.9,
+                                step=0.01,
+                                value=config.dream.exploration_floor,
+                            ),
+                            html.Label("Attractor force", className="control-label"),
+                            dcc.Slider(
+                                id="attractor-force",
+                                min=0.0,
+                                max=1.0,
+                                step=0.01,
+                                value=config.dream.attractor_force_weight,
+                            ),
                             html.Label("Branch count", className="control-label"),
                             dcc.Slider(id="branches", min=1, max=5, step=1, value=config.dream.branch_count),
                             html.Label("Branch policy", className="control-label"),
@@ -192,6 +218,21 @@ def create_dash_app(config: AppConfig) -> Dash:
                                 ],
                             ),
                             html.Pre(id="summary-stats", className="metrics-block"),
+                            html.H4("Selected timestep dream details", className="panel-title"),
+                            html.Pre(id="step-detail", className="metrics-block"),
+                            html.H4("Metrics legend", className="panel-title"),
+                            html.Div(
+                                className="meta-line",
+                                children=[
+                                    html.P("Coherence ↑ = stronger narrative continuity and stable latent trajectory."),
+                                    html.P("Density ↑ = local latent neighborhood crowding; useful for attractor tracking."),
+                                    html.P("Stability ↑ = preview token consistency across the stability window."),
+                                    html.P("Smoothness ↑ = lower curvature / gentler state transitions."),
+                                    html.P("Branch divergence ↑ = branch score spread; higher means more exploration."),
+                                    html.P("Phase duration ↑ = steps spent in current phase segment."),
+                                    html.P("Basin force/spread/samples = prior pressure diagnostics for basin guidance."),
+                                ],
+                            ),
                             html.Div(
                                 className="run-controls-row",
                                 children=[
@@ -288,11 +329,29 @@ def create_dash_app(config: AppConfig) -> Dash:
         State("threshold", "value"),
         State("tick-hz", "value"),
         State("noise", "value"),
+        State("coherence-gain", "value"),
+        State("exploration-floor", "value"),
+        State("attractor-force", "value"),
         State("branches", "value"),
         State("branch-policy", "value"),
         prevent_initial_call=True,
     )
-    def controls(start, pause, resume, stop, prompt, basin, threshold, tick_hz, noise, branches, branch_policy):
+    def controls(
+        start,
+        pause,
+        resume,
+        stop,
+        prompt,
+        basin,
+        threshold,
+        tick_hz,
+        noise,
+        coherence_gain,
+        exploration_floor,
+        attractor_force,
+        branches,
+        branch_policy,
+    ):
         trigger = ctx.triggered_id
         if trigger == "start-btn":
             config.dream.prompt = prompt or ""
@@ -300,6 +359,9 @@ def create_dash_app(config: AppConfig) -> Dash:
             config.dream.coherence_threshold = float(threshold)
             config.dream.tick_hz = float(tick_hz)
             config.dream.noise_amplitude = float(noise)
+            config.dream.coherence_gain = float(coherence_gain)
+            config.dream.exploration_floor = float(exploration_floor)
+            config.dream.attractor_force_weight = float(attractor_force)
             config.dream.branch_count = int(branches)
             config.dream.branch_selection_policy = BranchSelectionPolicy(branch_policy)
             controller.start(config.dream)
@@ -462,7 +524,7 @@ def create_dash_app(config: AppConfig) -> Dash:
             f"| behaviors=capture:{caps.supports_capture},reinject:{caps.supports_reinject},"
             f"decode_provenance:{caps.supports_decode_provenance},control_authority:{caps.supports_control_authority} "
             f"| capture_sites: {caps.capture_sites or ['none']}{suffix}{verification_suffix}"
-            f"| decode_lane:{decode_lane} | capture_sites: {caps.capture_sites or ['none']}{suffix}"
+            f"| decode_lane:{decode_lane}"
         )
 
     @app.callback(Output("preview-title", "children"), Input("ticker", "n_intervals"))
@@ -501,6 +563,7 @@ def create_dash_app(config: AppConfig) -> Dash:
         Output("basin-filter", "options"),
         Output("basin-filter", "value"),
         Output("summary-stats", "children"),
+        Output("step-detail", "children"),
         Input("ticker", "n_intervals"),
         Input("scrub-step", "value"),
         Input("run-filter", "value"),
@@ -518,7 +581,7 @@ def create_dash_app(config: AppConfig) -> Dash:
             fig.update_layout(template=plotly_template, uirevision="latent-atlas")
             metrics_fig = go.Figure()
             metrics_fig.update_layout(template=plotly_template, title="Rolling metrics")
-            return "", "", "No ticks yet.", fig, "No step selected.", "", metrics_fig, [], [], [], [], "No summary stats yet."
+            return "", "", "No ticks yet.", fig, "No step selected.", "", metrics_fig, [], [], [], [], "No summary stats yet.", "No timestep details yet."
 
         if run_filter:
             frame = frame[frame["run_id"].isin(run_filter)]
@@ -550,6 +613,7 @@ def create_dash_app(config: AppConfig) -> Dash:
                 basin_options,
                 selected_basins,
                 "No summary stats for current filters.",
+                "No timestep details for current filters.",
             )
 
         metric_frames = []
@@ -571,6 +635,10 @@ def create_dash_app(config: AppConfig) -> Dash:
             metrics_frame["stability"] = metrics_frame.get("token_stability", pd.Series(dtype=float))
             candidate_series = metrics_frame.get("candidate_scores", pd.Series(["[]"] * len(metrics_frame)))
             metrics_frame["branch_divergence"] = candidate_series.apply(_compute_branch_divergence)
+            metrics_frame["adaptive_noise"] = metrics_frame.get("adaptive_noise", pd.Series(0.0, index=metrics_frame.index))
+            metrics_frame["adaptive_attractor_weight"] = metrics_frame.get(
+                "adaptive_attractor_weight", pd.Series(config.dream.attractor_force_weight, index=metrics_frame.index)
+            )
             phase_change = metrics_frame.groupby("run_id")["phase"].transform(lambda s: s.ne(s.shift()).astype(int))
             metrics_frame["phase_segment"] = phase_change.groupby(metrics_frame["run_id"]).cumsum()
             metrics_frame["phase_duration"] = metrics_frame.groupby(["run_id", "phase_segment"]).cumcount() + 1
@@ -667,11 +735,27 @@ def create_dash_app(config: AppConfig) -> Dash:
                 f"basin_samples={int(row.get('basin_sample_count', 0))}\n"
                 f"basin_force={float(row.get('basin_force_magnitude', 0.0)):.3f}\n"
                 f"basin_spread={float(row.get('basin_prior_spread', 0.0)):.3f}\n"
+                f"adaptive_noise={float(row.get('adaptive_noise', 0.0)):.3f}\n"
+                f"adaptive_attractor_weight={float(row.get('adaptive_attractor_weight', 0.0)):.3f}\n"
                 f"candidate_scores={row.get('candidate_scores', '[]')}\n"
                 f"rejected_candidates={row.get('rejected_candidates', '[]')}\n"
                 f"selection_trace={row.get('selected_branch_trace', '{}')}\n"
                 f"decode_provenance={row.get('decode_provenance', 'unknown')}"
             )
+            step_detail_payload = {
+                "state_id": str(row.get("state_id", "")),
+                "run_id": str(row.get("run_id", "")),
+                "step_idx": int(row.get("step_idx", selected_step)),
+                "phase": str(row.get("phase", "")),
+                "mode": str(row.get("mode", "")),
+                "preview_text_full": str(row.get("preview") or ""),
+                "committed_text_full": str(row.get("committed") or ""),
+                "latent_source": str(row.get("latent_source", "")),
+                "candidate_scores_raw": str(row.get("candidate_scores", "[]")),
+                "selection_trace_raw": str(row.get("selected_branch_trace", "{}")),
+            }
+        else:
+            step_detail_payload = {"step_idx": selected_step, "detail": "No selected row."}
 
         if tick is not None and selected_step == max_step:
             metrics = (
@@ -699,6 +783,8 @@ def create_dash_app(config: AppConfig) -> Dash:
                 f"basin_mean_density={tick.basin_mean_density:.3f}\n"
                 f"basin_force={tick.basin_force_magnitude:.3f}\n"
                 f"basin_spread={tick.basin_prior_spread:.3f}\n"
+                f"adaptive_noise={tick.adaptive_noise:.3f}\n"
+                f"adaptive_attractor_weight={tick.adaptive_attractor_weight:.3f}\n"
                 f"decode_provenance={tick.decode_provenance}"
             )
 
@@ -722,11 +808,25 @@ def create_dash_app(config: AppConfig) -> Dash:
                     f"basin_samples={int(replay_row.get('basin_sample_count', 0))}\n"
                     f"basin_force={float(replay_row.get('basin_force_magnitude', 0.0)):.3f}\n"
                     f"basin_spread={float(replay_row.get('basin_prior_spread', 0.0)):.3f}\n"
+                    f"adaptive_noise={float(replay_row.get('adaptive_noise', 0.0)):.3f}\n"
+                    f"adaptive_attractor_weight={float(replay_row.get('adaptive_attractor_weight', 0.0)):.3f}\n"
                     f"candidate_scores={replay_row.get('candidate_scores', '[]')}\n"
                     f"rejected_candidates={replay_row.get('rejected_candidates', '[]')}\n"
                     f"selection_trace={replay_row.get('selected_branch_trace', '{}')}\n"
                     f"decode_path_diagnostics={replay_row.get('decode_provenance', 'unknown')}"
                 )
+                step_detail_payload = {
+                    "state_id": str(replay_row.get("state_id", "")),
+                    "run_id": str(replay_row.get("run_id", "")),
+                    "step_idx": int(replay_row.get("step_idx", selected_step)),
+                    "phase": str(replay_row.get("phase", "")),
+                    "mode": str(replay_row.get("mode", "")),
+                    "preview_text_full": str(replay_row.get("preview_text") or preview_text),
+                    "committed_text_full": str(replay_row.get("committed_text") or committed_text),
+                    "latent_source": str(replay_row.get("latent_source", "")),
+                    "candidate_scores_raw": str(replay_row.get("candidate_scores", "[]")),
+                    "selection_trace_raw": str(replay_row.get("selected_branch_trace", "{}")),
+                }
 
         rolling = go.Figure()
         if not metrics_frame.empty:
@@ -734,11 +834,29 @@ def create_dash_app(config: AppConfig) -> Dash:
             for run_id, run_df in metrics_frame.groupby("run_id"):
                 run_df = run_df.sort_values("step_idx")
                 smoothed = run_df.copy()
-                for col in ["coherence", "density", "smoothness", "stability", "branch_divergence", "phase_duration"]:
+                for col in [
+                    "coherence",
+                    "density",
+                    "smoothness",
+                    "stability",
+                    "branch_divergence",
+                    "phase_duration",
+                    "adaptive_noise",
+                    "adaptive_attractor_weight",
+                ]:
                     if col in smoothed.columns:
                         smoothed[col] = smoothed[col].rolling(window=rolling_window, min_periods=1).mean()
                 label = str(run_id)[:8]
-                for metric_name in ["coherence", "density", "smoothness", "stability", "branch_divergence", "phase_duration"]:
+                for metric_name in [
+                    "coherence",
+                    "density",
+                    "smoothness",
+                    "stability",
+                    "branch_divergence",
+                    "phase_duration",
+                    "adaptive_noise",
+                    "adaptive_attractor_weight",
+                ]:
                     if metric_name not in smoothed.columns:
                         continue
                     rolling.add_trace(
@@ -754,6 +872,7 @@ def create_dash_app(config: AppConfig) -> Dash:
 
         summary_table = _summarize_metrics(metrics_frame)
         summary_txt = summary_table.to_string(index=False, float_format=lambda v: f"{v:.4f}") if not summary_table.empty else "No summary stats yet."
+        detail_txt = json.dumps(step_detail_payload, indent=2)
         return (
             preview_text,
             committed_text,
@@ -767,6 +886,7 @@ def create_dash_app(config: AppConfig) -> Dash:
             basin_options,
             selected_basins,
             summary_txt,
+            detail_txt,
         )
 
     @app.callback(
@@ -801,6 +921,10 @@ def create_dash_app(config: AppConfig) -> Dash:
         metrics_frame["stability"] = metrics_frame.get("token_stability", pd.Series(dtype=float))
         candidate_series = metrics_frame.get("candidate_scores", pd.Series(["[]"] * len(metrics_frame)))
         metrics_frame["branch_divergence"] = candidate_series.apply(_compute_branch_divergence)
+        metrics_frame["adaptive_noise"] = metrics_frame.get("adaptive_noise", pd.Series(0.0, index=metrics_frame.index))
+        metrics_frame["adaptive_attractor_weight"] = metrics_frame.get(
+            "adaptive_attractor_weight", pd.Series(config.dream.attractor_force_weight, index=metrics_frame.index)
+        )
         phase_change = metrics_frame.groupby("run_id")["phase"].transform(lambda s: s.ne(s.shift()).astype(int))
         metrics_frame["phase_segment"] = phase_change.groupby(metrics_frame["run_id"]).cumsum()
         metrics_frame["phase_duration"] = metrics_frame.groupby(["run_id", "phase_segment"]).cumcount() + 1

@@ -251,15 +251,21 @@ class LlamaCppBackend(RuntimeBackend):
 
     def decode_approximate_prompt_synthesis_preview(self, state: LatentState, max_tokens: int = 16) -> str:
         self.load()
+        latent_vec = np.asarray(state.latent_vector, dtype=np.float32).reshape(-1)
+        if latent_vec.size:
+            top_idx = np.argsort(np.abs(latent_vec))[-6:]
+            anchors = ", ".join(f"f{int(i)}:{float(latent_vec[i]):+.2f}" for i in top_idx)
+        else:
+            anchors = "none"
         if self._llm is not None:
-            seed = state.metadata.get("prompt_seed", "")
             context = state.committed_prefix.strip()
             phase = str(state.phase.value).replace("_", " ").lower()
             prompt = (
-                f"Dream prompt: {seed}\n"
+                "Decode this latent trace into sensory dream imagery.\n"
+                f"Latent anchors: {anchors}\n"
                 f"Dream phase: {phase}\n"
                 f"Committed memory: {context or '[none]'}\n"
-                "Continue the dream with vivid concrete imagery:"
+                "Output one vivid concrete scene fragment:"
             )
             try:
                 out = self._llm(
@@ -330,12 +336,17 @@ class LlamaCppBackend(RuntimeBackend):
         state.metadata["commit_source"] = "approximate_prompt_synthesis"
         self.load()
         if self._llm is not None:
-            seed = state.metadata.get("prompt_seed", "")
             context = state.committed_prefix.strip()
             phase = str(state.phase.value).replace("_", " ").lower()
+            latent_vec = np.asarray(state.latent_vector, dtype=np.float32).reshape(-1)
+            if latent_vec.size:
+                top_idx = np.argsort(np.abs(latent_vec))[-6:]
+                anchors = ", ".join(f"f{int(i)}:{float(latent_vec[i]):+.2f}" for i in top_idx)
+            else:
+                anchors = "none"
             prompt = (
                 "Synthesize one concise committed memory fragment for a dream journal.\n"
-                f"Prompt seed: {seed or '[none]'}\n"
+                f"Latent anchors: {anchors}\n"
                 f"Dream phase: {phase}\n"
                 f"Already committed context: {context or '[none]'}\n"
                 "Return only the fragment text:"

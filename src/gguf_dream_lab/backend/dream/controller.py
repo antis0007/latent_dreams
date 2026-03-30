@@ -63,6 +63,8 @@ class DreamTick:
     coherence_component_smoothness: float
     coherence_component_branch_agreement: float
     coherence_component_known_state_similarity: float
+    adaptive_noise: float
+    adaptive_attractor_weight: float
     status: str
 
 
@@ -139,6 +141,7 @@ class DreamController:
         prev_vec = latent.latent_vector.copy()
         self._previous_direction = np.zeros_like(prev_vec)
         anneal = 1.0
+        coherence_window: deque[float] = deque(maxlen=8)
 
         while not self._stop_event.is_set():
             if self._pause_event.is_set():
@@ -147,7 +150,18 @@ class DreamController:
 
             tick_start = time.perf_counter()
             phase = self._phase_for_step(self.state.step_idx)
-            candidates = self._branch_candidates(latent, cfg, anneal, phase, step_idx=self.state.step_idx)
+            recent_coherence = float(np.mean(coherence_window)) if coherence_window else latent.coherence
+            adaptive_noise = self._adaptive_noise(cfg, anneal=anneal, recent_coherence=recent_coherence)
+            adaptive_attractor = self._adaptive_attractor_weight(cfg, recent_coherence=recent_coherence)
+            candidates = self._branch_candidates(
+                latent,
+                cfg,
+                anneal,
+                phase,
+                step_idx=self.state.step_idx,
+                adaptive_noise=adaptive_noise,
+                adaptive_attractor_weight=adaptive_attractor,
+            )
             latent.metadata["branch_selection_policy"] = cfg.branch_selection_policy.value
             latent = self._choose_candidate(candidates, prev_latent=latent)
             candidate_scores = str(latent.metadata.get("candidate_scores", "[]"))
@@ -174,6 +188,8 @@ class DreamController:
             latent.coherence = coherence_breakdown.score
             latent.metadata["coherence_components"] = coherence_breakdown.components
             latent.metadata["coherence_weighted_contributions"] = coherence_breakdown.weighted_contributions
+            latent.metadata["adaptive_noise"] = adaptive_noise
+            latent.metadata["adaptive_attractor_weight"] = adaptive_attractor
             latent.preview_text = self.state.preview_text
             latent.committed_prefix = self.state.committed_text
 
@@ -249,10 +265,15 @@ class DreamController:
                 coherence_component_known_state_similarity=float(
                     coherence_breakdown.weighted_contributions.get("known_state_similarity", 0.0)
                 ),
+                adaptive_noise=float(latent.metadata.get("adaptive_noise", cfg.noise_amplitude * anneal)),
+                adaptive_attractor_weight=float(
+                    latent.metadata.get("adaptive_attractor_weight", cfg.attractor_force_weight)
+                ),
                 status=self.state.status,
             )
             self.state.latest_tick = tick
             self.tick_history.append(tick)
+            coherence_window.append(float(latent.coherence))
             self.state.step_idx += 1
             anneal *= cfg.anneal_rate
             elapsed = time.perf_counter() - tick_start
@@ -303,6 +324,8 @@ class DreamController:
         phase: DreamPhase,
         *,
         step_idx: int,
+        adaptive_noise: float,
+        adaptive_attractor_weight: float,
     ) -> list[LatentState]:
         neighbors = self._neighbor_vector(latent.latent_vector)
         prior = self.atlas.basin_prior_stats(latent.basin, ref_vector=latent.latent_vector)
@@ -337,7 +360,7 @@ class DreamController:
                 ((1.0 - cfg.basin_retention) * target)
                 + (cfg.basin_retention * basin_centroid)
                 + (cfg.basin_force_weight * basin_force)
-                + (cfg.attractor_force_weight * attractor_force)
+                + (adaptive_attractor_weight * attractor_force)
                 + (cfg.basin_drift * (latent.latent_vector - basin_centroid))
             )
             constrained_target, target_distance, target_distance_penalty = self._apply_step_constraint(
@@ -345,16 +368,16 @@ class DreamController:
                 target,
                 max_distance=cfg.max_step_distance,
             )
-            perturb = rng.normal(scale=cfg.noise_amplitude * anneal * 0.5, size=target.shape).astype(np.float32)
+            perturb = rng.normal(scale=adaptive_noise * 0.5, size=target.shape).astype(np.float32)
             proposal = self.runtime.evolve_latent_state(
                 latent,
                 target_vector=constrained_target + perturb,
-                noise_scale=cfg.noise_amplitude * anneal,
+                noise_scale=adaptive_noise,
                 noise_seed=branch_seed,
             )
             proposal = self._normalize_latent_state(proposal)
             proposal.phase = phase
-            branch_agreement = 1.0 if branch_count == 1 else 1.0 - (cfg.noise_amplitude * anneal * 0.25)
+            branch_agreement = 1.0 if branch_count == 1 else 1.0 - (adaptive_noise * 0.25)
             branch_smoothness = self._smoothness(latent.latent_vector, proposal.latent_vector)
             branch_density = self._estimate_local_density(proposal.latent_vector)
             branch_coherence_estimate = self._branch_coherence_estimate(
@@ -407,6 +430,8 @@ class DreamController:
                 {
                     "target_distance": float(target_distance),
                     "max_step_distance": float(cfg.max_step_distance),
+                    "adaptive_noise": float(adaptive_noise),
+                    "adaptive_attractor_weight": float(adaptive_attractor_weight),
                     "attractor_sample_count": int(attractor_stats.get("sample_count", 0)) if attractor_stats else 0,
                     "attractor_mean_recurrence": float(attractor_stats.get("mean_recurrence", 0.0))
                     if attractor_stats
@@ -536,6 +561,20 @@ class DreamController:
         if self._decode_capability_level() == "true_latent_readout":
             return "decode_true_latent_readout_preview"
         return "decode_approximate_prompt_synthesis_preview"
+
+    @staticmethod
+    def _adaptive_noise(cfg: DreamConfig, *, anneal: float, recent_coherence: float) -> float:
+        coherence_term = max(0.0, min(1.0, recent_coherence))
+        reduction = cfg.coherence_gain * coherence_term
+        floor = max(0.01, cfg.noise_amplitude * cfg.exploration_floor)
+        adaptive = (cfg.noise_amplitude * anneal) * (1.0 - reduction)
+        return float(max(floor, adaptive))
+
+    @staticmethod
+    def _adaptive_attractor_weight(cfg: DreamConfig, *, recent_coherence: float) -> float:
+        coherence_term = max(0.0, min(1.0, recent_coherence))
+        # As coherence grows, nudge slightly harder toward attractors to stabilize narratives.
+        return float(min(1.0, cfg.attractor_force_weight + (0.25 * coherence_term)))
 
     def _decode_capability_level(self) -> str:
         caps = self.runtime.capabilities()
