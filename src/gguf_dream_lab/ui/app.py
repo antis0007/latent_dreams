@@ -566,7 +566,6 @@ def create_dash_app(config: AppConfig) -> Dash:
         Output("basin-filter", "value"),
         Output("summary-stats", "children"),
         Output("step-detail", "children"),
-        Output("state-window", "children"),
         Input("ticker", "n_intervals"),
         Input("scrub-step", "value"),
         Input("run-filter", "value"),
@@ -598,7 +597,6 @@ def create_dash_app(config: AppConfig) -> Dash:
                 [],
                 "No summary stats yet.",
                 "No timestep details yet.",
-                "No state window yet.",
             )
 
         if run_filter:
@@ -632,7 +630,6 @@ def create_dash_app(config: AppConfig) -> Dash:
                 selected_basins,
                 "No summary stats for current filters.",
                 "No timestep details for current filters.",
-                "No state window for current filters.",
             )
 
         metric_frames = []
@@ -892,24 +889,6 @@ def create_dash_app(config: AppConfig) -> Dash:
         summary_table = _summarize_metrics(metrics_frame)
         summary_txt = summary_table.to_string(index=False, float_format=lambda v: f"{v:.4f}") if not summary_table.empty else "No summary stats yet."
         detail_txt = json.dumps(step_detail_payload, indent=2)
-        state_cols = [
-            "run_label",
-            "run_id",
-            "step_idx",
-            "phase",
-            "mode",
-            "coherence",
-            "density",
-            "entropy",
-            "latent_source",
-        ]
-        available_state_cols = [col for col in state_cols if col in traj.columns]
-        state_window = (
-            traj[available_state_cols]
-            .sort_values(["run_id", "step_idx"])
-            .tail(20)
-            .to_string(index=False, float_format=lambda v: f"{v:.4f}")
-        )
         return (
             preview_text,
             committed_text,
@@ -924,7 +903,44 @@ def create_dash_app(config: AppConfig) -> Dash:
             selected_basins,
             summary_txt,
             detail_txt,
-            state_window,
+        )
+
+    @app.callback(
+        Output("state-window", "children"),
+        Input("ticker", "n_intervals"),
+        Input("run-filter", "value"),
+        Input("mode-filter", "value"),
+        Input("basin-filter", "value"),
+    )
+    def refresh_state_window(_, run_filter, mode_filter, basin_filter):
+        frame = controller.atlas.to_frame()
+        if frame.empty:
+            return "No state window yet."
+        if run_filter:
+            frame = frame[frame["run_id"].isin(run_filter)]
+        if mode_filter and "mode" in frame.columns:
+            frame = frame[frame["mode"].isin(mode_filter)]
+        if basin_filter:
+            frame = frame[frame["basin"].isin(basin_filter)]
+        if frame.empty:
+            return "No state window for current filters."
+        state_cols = [
+            "run_label",
+            "run_id",
+            "step_idx",
+            "phase",
+            "mode",
+            "coherence",
+            "density",
+            "entropy",
+            "latent_source",
+        ]
+        available_state_cols = [col for col in state_cols if col in frame.columns]
+        return (
+            frame[available_state_cols]
+            .sort_values(["run_id", "step_idx"])
+            .tail(20)
+            .to_string(index=False, float_format=lambda v: f"{v:.4f}")
         )
 
     @app.callback(
