@@ -89,6 +89,10 @@ class LlamaCppBackend(RuntimeBackend):
             logger.warning(self._llama_error)
         self._loaded = True
 
+    def teardown(self) -> None:
+        self._llm = None
+        self._loaded = False
+
     def capabilities(self) -> RuntimeCapabilities:
         warnings = []
         if self._llama_error:
