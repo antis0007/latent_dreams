@@ -11,7 +11,7 @@ import json
 import numpy as np
 
 from gguf_dream_lab.backend.atlas.atlas import LatentAtlas, TransitionEdge
-from gguf_dream_lab.backend.dream.coherence import score_coherence
+from gguf_dream_lab.backend.dream.coherence import score_coherence, score_coherence_breakdown
 from gguf_dream_lab.backend.dream.state import DreamMode, DreamPhase, LatentState
 from gguf_dream_lab.backend.runtime.base import RuntimeBackend
 from gguf_dream_lab.config.models import Basin, BranchSelectionPolicy, CoherenceWeights, DreamConfig
@@ -57,6 +57,12 @@ class DreamTick:
     navigation_decision: str
     penalty_breakdown: str
     decode_provenance: str
+    coherence_component_entropy: float
+    coherence_component_density: float
+    coherence_component_token_stability: float
+    coherence_component_smoothness: float
+    coherence_component_branch_agreement: float
+    coherence_component_known_state_similarity: float
     status: str
 
 
@@ -156,7 +162,7 @@ class DreamController:
             prev_vec = latent.latent_vector.copy()
             latent.density = local_density
             latent.entropy = max(0.01, 1.0 - min(local_density / 4.0, 0.9))
-            latent.coherence = score_coherence(
+            coherence_breakdown = score_coherence_breakdown(
                 entropy=latent.entropy,
                 local_density=local_density,
                 token_stability=token_stability,
@@ -165,6 +171,9 @@ class DreamController:
                 known_state_similarity=min(local_density / 5.0, 1.0),
                 weights=cfg.weights,
             )
+            latent.coherence = coherence_breakdown.score
+            latent.metadata["coherence_components"] = coherence_breakdown.components
+            latent.metadata["coherence_weighted_contributions"] = coherence_breakdown.weighted_contributions
             latent.preview_text = self.state.preview_text
             latent.committed_prefix = self.state.committed_text
 
@@ -227,6 +236,18 @@ class DreamController:
                 decode_provenance=(
                     f"preview={preview_decode_source};commit={commit_decode_source};"
                     f"preview_cadence={cfg.preview_decode_cadence}"
+                ),
+                coherence_component_entropy=float(coherence_breakdown.weighted_contributions.get("entropy", 0.0)),
+                coherence_component_density=float(coherence_breakdown.weighted_contributions.get("density", 0.0)),
+                coherence_component_token_stability=float(
+                    coherence_breakdown.weighted_contributions.get("token_stability", 0.0)
+                ),
+                coherence_component_smoothness=float(coherence_breakdown.weighted_contributions.get("smoothness", 0.0)),
+                coherence_component_branch_agreement=float(
+                    coherence_breakdown.weighted_contributions.get("branch_agreement", 0.0)
+                ),
+                coherence_component_known_state_similarity=float(
+                    coherence_breakdown.weighted_contributions.get("known_state_similarity", 0.0)
                 ),
                 status=self.state.status,
             )
