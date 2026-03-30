@@ -150,3 +150,48 @@ def test_basin_prior_stats_and_frame_include_basin_metrics():
     assert int(stats["sample_count"]) == 1
     assert "basin_sample_count" in frame.columns
     assert float(frame.iloc[0]["basin_force_magnitude"]) == 0.4
+
+
+def test_compute_attractor_vector_uses_recurrence_and_dwell():
+    atlas = LatentAtlas()
+    atlas.append_points(
+        [
+            StatePoint(
+                state_id="s0",
+                run_id="r0",
+                run_label="run",
+                basin="narrative",
+                step_idx=0,
+                preview="",
+                committed="",
+                coherence=0.8,
+                entropy=0.2,
+                recurrence=4,
+                dwell_time=3.0,
+                attractor_strength=5.0,
+                embedding=np.ones(8, dtype=np.float32),
+            ),
+            StatePoint(
+                state_id="s1",
+                run_id="r0",
+                run_label="run",
+                basin="narrative",
+                step_idx=1,
+                preview="",
+                committed="",
+                coherence=0.6,
+                entropy=0.3,
+                recurrence=1,
+                dwell_time=0.5,
+                attractor_strength=1.0,
+                embedding=np.ones(8, dtype=np.float32) * 0.5,
+            ),
+        ]
+    )
+
+    stats = atlas.compute_attractor_vector(basin="narrative", ref_vector=np.zeros(8, dtype=np.float32), top_k=2)
+
+    assert int(stats["sample_count"]) == 2
+    assert float(stats["mean_recurrence"]) > 0.0
+    assert float(stats["mean_dwell_time"]) > 0.0
+    assert np.linalg.norm(np.asarray(stats["force_vector"], dtype=np.float32)) > 0.0

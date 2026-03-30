@@ -149,3 +149,30 @@ def test_seed_latent_state_applies_basin_prior_metrics():
 
     assert int(seeded.metadata["basin_sample_count"]) == 1
     assert float(seeded.metadata["basin_mean_coherence"]) > 0.0
+
+
+def test_apply_step_constraint_caps_distance_and_reports_penalty():
+    current = np.zeros(4, dtype=np.float32)
+    target = np.array([2.0, 0.0, 0.0, 0.0], dtype=np.float32)
+
+    constrained, dist, penalty = DreamController._apply_step_constraint(current, target, max_distance=1.0)
+
+    assert np.isclose(dist, 2.0)
+    assert np.isclose(np.linalg.norm(constrained - current), 1.0)
+    assert penalty > 0.0
+
+
+def test_branch_score_includes_constraint_penalties():
+    baseline = DreamController._branch_score(coherence_estimate=0.8, distance_to_attractor=0.1, temporal_smoothness=0.9)
+    penalized = DreamController._branch_score(
+        coherence_estimate=0.8,
+        distance_to_attractor=0.1,
+        temporal_smoothness=0.9,
+        step_distance_penalty=0.5,
+        curvature_penalty=0.6,
+        curvature_weight=0.5,
+        basin_boundary_cost=0.7,
+        basin_boundary_weight=0.4,
+    )
+
+    assert penalized < baseline

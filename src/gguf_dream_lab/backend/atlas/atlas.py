@@ -323,6 +323,38 @@ class LatentAtlas:
         )
         return ranked[:top_k]
 
+    def compute_attractor_vector(
+        self,
+        *,
+        basin: str,
+        ref_vector: np.ndarray,
+        top_k: int = 5,
+    ) -> dict[str, float | int | np.ndarray]:
+        attractors = self.candidate_attractors(basin=basin, top_k=top_k)
+        if not attractors:
+            return {}
+        ref = np.asarray(ref_vector, dtype=np.float32).reshape(-1)
+        aligned = [self._align_for_reference(point.embedding, ref) for point in attractors]
+        mat = np.stack(aligned, axis=0)
+        centroid = np.mean(mat, axis=0)
+        weights = np.asarray(
+            [max(0.05, point.attractor_strength + point.recurrence + (0.25 * point.dwell_time)) for point in attractors],
+            dtype=np.float32,
+        )
+        weights = weights / (np.sum(weights) + 1e-9)
+        weighted_target = np.sum(mat * weights.reshape(-1, 1), axis=0)
+        force_vector = weighted_target - ref
+        distances = np.linalg.norm(mat - ref.reshape(1, -1), axis=1)
+        return {
+            "sample_count": len(attractors),
+            "centroid": centroid.astype(np.float32),
+            "force_vector": force_vector.astype(np.float32),
+            "mean_distance": float(np.mean(distances)),
+            "mean_recurrence": float(np.mean([point.recurrence for point in attractors])),
+            "mean_dwell_time": float(np.mean([point.dwell_time for point in attractors])),
+            "max_strength": float(np.max([point.attractor_strength for point in attractors])),
+        }
+
     def to_frame(self) -> pd.DataFrame:
         with self._lock:
             rows = []
