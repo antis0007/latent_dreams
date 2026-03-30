@@ -46,6 +46,11 @@ class DreamTick:
     branch_seed: int
     branch_score: float
     candidate_scores: str
+    basin_sample_count: int
+    basin_mean_coherence: float
+    basin_mean_density: float
+    basin_force_magnitude: float
+    basin_prior_spread: float
     decode_provenance: str
     status: str
 
@@ -199,6 +204,11 @@ class DreamController:
                 branch_seed=int(latent.metadata.get("branch_seed", 0)),
                 branch_score=float(latent.metadata.get("branch_score", 0.0)),
                 candidate_scores=candidate_scores,
+                basin_sample_count=int(latent.metadata.get("basin_sample_count", 0)),
+                basin_mean_coherence=float(latent.metadata.get("basin_mean_coherence", 0.0)),
+                basin_mean_density=float(latent.metadata.get("basin_mean_density", 0.0)),
+                basin_force_magnitude=float(latent.metadata.get("basin_force_magnitude", 0.0)),
+                basin_prior_spread=float(latent.metadata.get("basin_prior_spread", 0.0)),
                 decode_provenance=(
                     f"preview={preview_decode_source};commit={commit_decode_source};"
                     f"preview_cadence={cfg.preview_decode_cadence}"
@@ -220,13 +230,32 @@ class DreamController:
         return self.runtime.decode_approximate_prompt_synthesis_preview(latent, max_tokens=max_tokens)
 
     def _seed_latent_state(self, cfg: DreamConfig, prompt: str) -> LatentState:
-        basin_vec = self.atlas.sample_seed_from_basin(cfg.basin.value)
         latent = self._normalize_latent_state(self.runtime.capture_latent_state(self.state.run_id, cfg.basin.value, prompt))
-        if basin_vec is not None:
-            basin_vec = np.asarray(basin_vec, dtype=np.float32).reshape(-1)
-            basin_vec = self._align_vector_shape(basin_vec, latent.latent_vector)
-            blended = 0.65 * basin_vec + 0.35 * latent.latent_vector
+        prior = self.atlas.basin_prior_stats(cfg.basin.value, ref_vector=latent.latent_vector)
+        if prior:
+            basin_centroid = self._align_vector_shape(np.asarray(prior["centroid"], dtype=np.float32), latent.latent_vector)
+            basin_force = self._align_vector_shape(np.asarray(prior["force_vector"], dtype=np.float32), latent.latent_vector)
+            retention = float(cfg.basin_retention)
+            drift = float(cfg.basin_drift)
+            force_weight = float(cfg.basin_force_weight)
+            blended = (
+                ((1.0 - retention) * latent.latent_vector)
+                + (retention * basin_centroid)
+                + (force_weight * basin_force)
+                + (drift * (latent.latent_vector - basin_centroid))
+            )
             latent = latent.clone_with_vector(blended, phase=DreamPhase.HYPNAGOGIC)
+            latent.metadata["basin_sample_count"] = int(prior.get("sample_count", 0))
+            latent.metadata["basin_mean_coherence"] = float(prior.get("mean_coherence", 0.0))
+            latent.metadata["basin_mean_density"] = float(prior.get("mean_density", 0.0))
+            latent.metadata["basin_prior_spread"] = float(prior.get("prior_spread", 0.0))
+            latent.metadata["basin_force_magnitude"] = float(np.linalg.norm(basin_force))
+        else:
+            latent.metadata["basin_sample_count"] = 0
+            latent.metadata["basin_mean_coherence"] = 0.0
+            latent.metadata["basin_mean_density"] = 0.0
+            latent.metadata["basin_prior_spread"] = 0.0
+            latent.metadata["basin_force_magnitude"] = 0.0
         latent.metadata["prompt_seed"] = prompt
         return latent
 
@@ -240,6 +269,17 @@ class DreamController:
         step_idx: int,
     ) -> list[LatentState]:
         neighbors = self._neighbor_vector(latent.latent_vector)
+        prior = self.atlas.basin_prior_stats(latent.basin, ref_vector=latent.latent_vector)
+        basin_centroid = (
+            self._align_vector_shape(np.asarray(prior["centroid"], dtype=np.float32), latent.latent_vector)
+            if prior
+            else latent.latent_vector
+        )
+        basin_force = (
+            self._align_vector_shape(np.asarray(prior["force_vector"], dtype=np.float32), latent.latent_vector)
+            if prior
+            else np.zeros_like(latent.latent_vector, dtype=np.float32)
+        )
         candidates = []
         branch_count = max(cfg.branch_count, 1)
         for branch_idx in range(branch_count):
@@ -247,6 +287,12 @@ class DreamController:
             branch_seed = self._branch_seed(self.state.run_id, step_idx, branch_idx)
             rng = np.random.default_rng(branch_seed)
             target = 0.7 * neighbors + 0.3 * latent.latent_vector
+            target = (
+                ((1.0 - cfg.basin_retention) * target)
+                + (cfg.basin_retention * basin_centroid)
+                + (cfg.basin_force_weight * basin_force)
+                + (cfg.basin_drift * (latent.latent_vector - basin_centroid))
+            )
             perturb = rng.normal(scale=cfg.noise_amplitude * anneal * 0.5, size=target.shape).astype(np.float32)
             proposal = self.runtime.evolve_latent_state(
                 latent,
@@ -279,6 +325,11 @@ class DreamController:
             proposal.metadata["distance_to_attractor"] = distance_to_attractor
             proposal.metadata["temporal_smoothness"] = branch_smoothness
             proposal.metadata["branch_score"] = branch_score
+            proposal.metadata["basin_sample_count"] = int(prior.get("sample_count", 0)) if prior else 0
+            proposal.metadata["basin_mean_coherence"] = float(prior.get("mean_coherence", 0.0)) if prior else 0.0
+            proposal.metadata["basin_mean_density"] = float(prior.get("mean_density", 0.0)) if prior else 0.0
+            proposal.metadata["basin_prior_spread"] = float(prior.get("prior_spread", 0.0)) if prior else 0.0
+            proposal.metadata["basin_force_magnitude"] = float(np.linalg.norm(basin_force))
             candidates.append(proposal)
         return candidates
 

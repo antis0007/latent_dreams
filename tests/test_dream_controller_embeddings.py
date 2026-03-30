@@ -5,6 +5,7 @@ import numpy as np
 from gguf_dream_lab.backend.atlas.atlas import LatentAtlas, StatePoint
 from gguf_dream_lab.backend.dream.controller import DreamController
 from gguf_dream_lab.backend.dream.state import DreamMode, LatentState
+from gguf_dream_lab.config.models import Basin, DreamConfig
 
 
 class _DummyRuntime:
@@ -120,3 +121,31 @@ def test_neighbor_vector_ignores_self_neighbor():
     neighbor = controller._neighbor_vector(current)
 
     assert np.allclose(neighbor, current)
+
+
+def test_seed_latent_state_applies_basin_prior_metrics():
+    controller = _controller()
+    controller.atlas.append_points(
+        [
+            StatePoint(
+                state_id="s0",
+                run_id="r0",
+                run_label="run",
+                basin="narrative",
+                step_idx=0,
+                preview="",
+                committed="",
+                coherence=0.8,
+                entropy=0.2,
+                density=0.6,
+                attractor_strength=2.0,
+                embedding=np.ones(8, dtype=np.float32),
+            )
+        ]
+    )
+    cfg = DreamConfig(basin=Basin.NARRATIVE)
+
+    seeded = controller._seed_latent_state(cfg, "test prompt")
+
+    assert int(seeded.metadata["basin_sample_count"]) == 1
+    assert float(seeded.metadata["basin_mean_coherence"]) > 0.0

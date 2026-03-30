@@ -118,3 +118,35 @@ def test_append_latent_state_tracks_recurrence_and_attractor_strength():
 
     ranked = atlas.candidate_attractors(basin="narrative", top_k=2)
     assert ranked[0].attractor_id == first.state_id
+
+
+def test_basin_prior_stats_and_frame_include_basin_metrics():
+    atlas = LatentAtlas()
+    atlas.append_points(
+        [
+            StatePoint(
+                state_id="s0",
+                run_id="r0",
+                run_label="run",
+                basin="narrative",
+                step_idx=0,
+                preview="",
+                committed="",
+                coherence=0.7,
+                entropy=0.2,
+                density=0.5,
+                attractor_strength=1.2,
+                basin_sample_count=3,
+                basin_force_magnitude=0.4,
+                basin_prior_spread=0.3,
+                embedding=np.ones(8, dtype=np.float32),
+            )
+        ]
+    )
+
+    stats = atlas.basin_prior_stats("narrative", ref_vector=np.ones(8, dtype=np.float32))
+    frame = atlas.to_frame()
+
+    assert int(stats["sample_count"]) == 1
+    assert "basin_sample_count" in frame.columns
+    assert float(frame.iloc[0]["basin_force_magnitude"]) == 0.4

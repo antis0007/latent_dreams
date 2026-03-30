@@ -36,6 +36,11 @@ class StatePoint:
     return_count: int = 0
     return_frequency: float = 0.0
     attractor_strength: float = 0.0
+    basin_sample_count: int = 0
+    basin_mean_coherence: float = 0.0
+    basin_mean_density: float = 0.0
+    basin_force_magnitude: float = 0.0
+    basin_prior_spread: float = 0.0
 
 
 @dataclass
@@ -126,6 +131,11 @@ class LatentAtlas:
                 density=state.density,
                 recurrence=recurrence,
                 attractor_id=attractor_id,
+                basin_sample_count=int(state.metadata.get("basin_sample_count", 0)),
+                basin_mean_coherence=float(state.metadata.get("basin_mean_coherence", 0.0)),
+                basin_mean_density=float(state.metadata.get("basin_mean_density", 0.0)),
+                basin_force_magnitude=float(state.metadata.get("basin_force_magnitude", 0.0)),
+                basin_prior_spread=float(state.metadata.get("basin_prior_spread", 0.0)),
             )
             self._update_attractor_metrics(point, timestamp=state.timestamp)
             self.points.append(point)
@@ -265,6 +275,39 @@ class LatentAtlas:
         chosen = basin_points[np.random.randint(0, len(basin_points))]
         return chosen.embedding
 
+    def basin_prior_stats(self, basin: str, *, ref_vector: np.ndarray | None = None) -> dict[str, float | int | np.ndarray]:
+        basin_points = [p for p in self.points if p.basin == basin]
+        if not basin_points:
+            return {}
+        ref = np.asarray(ref_vector, dtype=np.float32).reshape(-1) if ref_vector is not None else basin_points[0].embedding
+        vecs = [self._align_for_reference(p.embedding, ref) for p in basin_points]
+        mat = np.stack(vecs, axis=0)
+        centroid = np.mean(mat, axis=0)
+        spread = float(np.mean(np.linalg.norm(mat - centroid.reshape(1, -1), axis=1)))
+        weighted = np.array([max(0.01, p.attractor_strength) for p in basin_points], dtype=np.float32)
+        weighted = weighted / (np.sum(weighted) + 1e-9)
+        force_anchor = np.sum(mat * weighted.reshape(-1, 1), axis=0)
+        force_vector = force_anchor - ref
+        return {
+            "sample_count": len(basin_points),
+            "mean_coherence": float(np.mean([p.coherence for p in basin_points])),
+            "mean_density": float(np.mean([p.density for p in basin_points])),
+            "centroid": centroid.astype(np.float32),
+            "force_vector": force_vector.astype(np.float32),
+            "prior_spread": spread,
+        }
+
+    @staticmethod
+    def _align_for_reference(vec: np.ndarray, ref: np.ndarray) -> np.ndarray:
+        vec = np.asarray(vec, dtype=np.float32).reshape(-1)
+        ref = np.asarray(ref, dtype=np.float32).reshape(-1)
+        if vec.shape == ref.shape:
+            return vec
+        aligned = np.zeros_like(ref)
+        upto = min(vec.shape[0], ref.shape[0])
+        aligned[:upto] = vec[:upto]
+        return aligned
+
     def candidate_attractors(self, basin: str | None = None, top_k: int = 5) -> list[StatePoint]:
         candidates = [p for p in self.points if basin is None or p.basin == basin]
         best_by_attractor: dict[str, StatePoint] = {}
@@ -310,6 +353,11 @@ class LatentAtlas:
                         "return_count": p.return_count,
                         "return_frequency": p.return_frequency,
                         "attractor_strength": p.attractor_strength,
+                        "basin_sample_count": p.basin_sample_count,
+                        "basin_mean_coherence": p.basin_mean_coherence,
+                        "basin_mean_density": p.basin_mean_density,
+                        "basin_force_magnitude": p.basin_force_magnitude,
+                        "basin_prior_spread": p.basin_prior_spread,
                         "x": float(x),
                         "y": float(y),
                         "cluster": cluster,
@@ -372,6 +420,11 @@ class AtlasStorage:
                     return_count=int(row.get("return_count", 0)),
                     return_frequency=float(row.get("return_frequency", 0.0)),
                     attractor_strength=float(row.get("attractor_strength", 0.0)),
+                    basin_sample_count=int(row.get("basin_sample_count", 0)),
+                    basin_mean_coherence=float(row.get("basin_mean_coherence", 0.0)),
+                    basin_mean_density=float(row.get("basin_mean_density", 0.0)),
+                    basin_force_magnitude=float(row.get("basin_force_magnitude", 0.0)),
+                    basin_prior_spread=float(row.get("basin_prior_spread", 0.0)),
                     embedding=np.array(embeddings[i], dtype=np.float32),
                 )
             )
