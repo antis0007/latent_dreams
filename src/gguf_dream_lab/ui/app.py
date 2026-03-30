@@ -13,7 +13,7 @@ from dash import Dash, Input, Output, State, ctx, dcc, html
 from gguf_dream_lab.backend.atlas.atlas import AtlasStorage
 from gguf_dream_lab.backend.dream.controller import DreamController
 from gguf_dream_lab.backend.runtime.capability_contracts import RuntimeBehaviorSnapshot, validate_mode_contract
-from gguf_dream_lab.backend.runtime.llama_backend import LlamaCppBackend
+from gguf_dream_lab.backend.runtime.manager import get_runtime_manager
 from gguf_dream_lab.config.models import AppConfig, Basin, BranchSelectionPolicy
 from gguf_dream_lab.storage.session_store import SessionStore
 
@@ -75,7 +75,7 @@ def _summarize_metrics(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def create_dash_app(config: AppConfig) -> Dash:
-    runtime = LlamaCppBackend(config.runtime)
+    runtime = get_runtime_manager().get_runtime(config.runtime)
     atlas_store = AtlasStorage(config.storage_dir / "atlas")
     atlas = atlas_store.load()
     controller = DreamController(runtime=runtime, atlas=atlas)
@@ -799,5 +799,9 @@ def create_dash_app(config: AppConfig) -> Dash:
 
 
 def run_ui(config: AppConfig, host: str = "127.0.0.1", port: int = 8050) -> None:
+    runtime_manager = get_runtime_manager()
     app = create_dash_app(config)
-    app.run(host=host, port=port, debug=False)
+    try:
+        app.run(host=host, port=port, debug=False)
+    finally:
+        runtime_manager.teardown(config.runtime)
