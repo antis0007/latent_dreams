@@ -524,7 +524,7 @@ def create_dash_app(config: AppConfig) -> Dash:
             f"| behaviors=capture:{caps.supports_capture},reinject:{caps.supports_reinject},"
             f"decode_provenance:{caps.supports_decode_provenance},control_authority:{caps.supports_control_authority} "
             f"| capture_sites: {caps.capture_sites or ['none']}{suffix}{verification_suffix}"
-            f"| decode_lane:{decode_lane} | capture_sites: {caps.capture_sites or ['none']}{suffix}"
+            f"| decode_lane:{decode_lane}"
         )
 
     @app.callback(Output("preview-title", "children"), Input("ticker", "n_intervals"))

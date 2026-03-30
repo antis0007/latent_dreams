@@ -59,3 +59,4 @@ gguf-dream-lab app --config sample_configs/default.json --host 127.0.0.1 --port 
 - `docs/limitations.md`
 - `docs/emergent_cognition_runtime_plan.md`
 - `docs/autonomous_latent_dreaming.md`
+- `docs/implementation_review.md`
