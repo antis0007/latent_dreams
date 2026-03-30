@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import ast
+import json
 from pathlib import Path
 from time import time
 
+import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, ctx, dcc, html
 
 from gguf_dream_lab.backend.atlas.atlas import AtlasStorage
@@ -12,6 +16,62 @@ from gguf_dream_lab.backend.runtime.capability_contracts import RuntimeBehaviorS
 from gguf_dream_lab.backend.runtime.llama_backend import LlamaCppBackend
 from gguf_dream_lab.config.models import AppConfig, Basin, BranchSelectionPolicy
 from gguf_dream_lab.storage.session_store import SessionStore
+
+
+def _parse_candidate_scores(candidate_scores: object) -> list[dict]:
+    if candidate_scores is None:
+        return []
+    if isinstance(candidate_scores, list):
+        return candidate_scores
+    raw = str(candidate_scores).strip()
+    if not raw:
+        return []
+    try:
+        loaded = json.loads(raw)
+        return loaded if isinstance(loaded, list) else []
+    except json.JSONDecodeError:
+        try:
+            loaded = ast.literal_eval(raw)
+            return loaded if isinstance(loaded, list) else []
+        except (ValueError, SyntaxError):
+            return []
+
+
+def _compute_branch_divergence(candidate_scores: object) -> float:
+    parsed = _parse_candidate_scores(candidate_scores)
+    scores = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        score = item.get("score")
+        try:
+            scores.append(float(score))
+        except (TypeError, ValueError):
+            continue
+    if len(scores) < 2:
+        return 0.0
+    return float(pd.Series(scores, dtype="float64").std(ddof=0))
+
+
+def _summarize_metrics(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame()
+    grouped = (
+        frame.groupby(["run_id", "mode", "basin"], dropna=False)
+        .agg(
+            steps=("step_idx", "count"),
+            coherence_mean=("coherence", "mean"),
+            density_mean=("density", "mean"),
+            smoothness_mean=("smoothness", "mean"),
+            stability_mean=("stability", "mean"),
+            branch_divergence_mean=("branch_divergence", "mean"),
+            phase_duration_mean=("phase_duration", "mean"),
+            phase_duration_max=("phase_duration", "max"),
+        )
+        .reset_index()
+        .sort_values(["run_id", "mode", "basin"])
+    )
+    return grouped
 
 
 def create_dash_app(config: AppConfig) -> Dash:
@@ -89,7 +149,49 @@ def create_dash_app(config: AppConfig) -> Dash:
                             html.H4("Committed (crystallized recall)", className="panel-title"),
                             html.Div(id="committed", className="text-block"),
                             html.Pre(id="metrics", className="metrics-block"),
+                            html.Div(
+                                className="run-controls-row",
+                                children=[
+                                    html.Div(
+                                        className="run-filter-wrap",
+                                        children=[
+                                            html.Label("Filter mode", className="control-label"),
+                                            dcc.Dropdown(
+                                                id="mode-filter",
+                                                options=[],
+                                                value=[],
+                                                multi=True,
+                                                placeholder="All modes",
+                                                className="control-field",
+                                            ),
+                                        ],
+                                    ),
+                                    html.Div(
+                                        className="run-filter-wrap",
+                                        children=[
+                                            html.Label("Filter basin", className="control-label"),
+                                            dcc.Dropdown(
+                                                id="basin-filter",
+                                                options=[],
+                                                value=[],
+                                                multi=True,
+                                                placeholder="All basins",
+                                                className="control-field",
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                            ),
                             dcc.Graph(id="latent-graph", className="latent-graph"),
+                            dcc.Graph(id="rolling-metrics-graph", className="latent-graph"),
+                            html.Div(
+                                className="run-controls-row",
+                                children=[
+                                    html.Button("Export summary CSV", id="export-summary-btn", className="control-btn"),
+                                    dcc.Download(id="summary-download"),
+                                ],
+                            ),
+                            html.Pre(id="summary-stats", className="metrics-block"),
                             html.Div(
                                 className="run-controls-row",
                                 children=[
@@ -393,25 +495,91 @@ def create_dash_app(config: AppConfig) -> Dash:
         Output("latent-graph", "figure"),
         Output("step-info", "children"),
         Output("selected-state", "children"),
+        Output("rolling-metrics-graph", "figure"),
+        Output("mode-filter", "options"),
+        Output("mode-filter", "value"),
+        Output("basin-filter", "options"),
+        Output("basin-filter", "value"),
+        Output("summary-stats", "children"),
         Input("ticker", "n_intervals"),
         Input("scrub-step", "value"),
         Input("run-filter", "value"),
+        Input("mode-filter", "value"),
+        Input("basin-filter", "value"),
         Input("timeline-cache", "data"),
         Input("lineage-path", "value"),
     )
-    def refresh_stream(_, scrub_step, run_filter, timeline, lineage_path_id):
+    def refresh_stream(_, scrub_step, run_filter, mode_filter, basin_filter, timeline, lineage_path_id):
         frame = controller.atlas.to_frame()
         if frame.empty:
             fig = px.scatter(x=[0], y=[0], title="No latent states yet")
             fig.update_layout(template="plotly_dark", uirevision="latent-atlas")
-            return "", "", "No ticks yet.", fig, "No step selected.", ""
+            metrics_fig = go.Figure()
+            metrics_fig.update_layout(template="plotly_dark", title="Rolling metrics")
+            return "", "", "No ticks yet.", fig, "No step selected.", "", metrics_fig, [], [], [], [], "No summary stats yet."
 
         if run_filter:
             frame = frame[frame["run_id"].isin(run_filter)]
+        mode_options = [{"label": str(mode), "value": str(mode)} for mode in sorted(frame.get("mode", pd.Series(dtype=str)).dropna().unique())]
+        basin_options = [{"label": str(basin), "value": str(basin)} for basin in sorted(frame["basin"].dropna().unique())]
+        available_modes = {opt["value"] for opt in mode_options}
+        available_basins = {opt["value"] for opt in basin_options}
+        selected_modes = [m for m in (mode_filter or []) if m in available_modes]
+        selected_basins = [b for b in (basin_filter or []) if b in available_basins]
+        if selected_modes and "mode" in frame.columns:
+            frame = frame[frame["mode"].isin(selected_modes)]
+        if selected_basins:
+            frame = frame[frame["basin"].isin(selected_basins)]
         if frame.empty:
             fig = px.scatter(x=[0], y=[0], title="No runs selected")
             fig.update_layout(template="plotly_dark", uirevision="latent-atlas")
-            return "", "", "No ticks for selected runs.", fig, "No step selected.", ""
+            metrics_fig = go.Figure()
+            metrics_fig.update_layout(template="plotly_dark", title="Rolling metrics")
+            return (
+                "",
+                "",
+                "No ticks for selected runs.",
+                fig,
+                "No step selected.",
+                "",
+                metrics_fig,
+                mode_options,
+                selected_modes,
+                basin_options,
+                selected_basins,
+                "No summary stats for current filters.",
+            )
+
+        metric_frames = []
+        for run_id in sorted(frame["run_id"].unique()):
+            if run_id == controller.state.run_id and controller.tick_history:
+                ticks_df = pd.DataFrame([tick.__dict__ for tick in controller.tick_history])
+            else:
+                ticks_df = session_store.load_ticks(run_id)
+            if ticks_df.empty:
+                continue
+            ticks_df = ticks_df.copy()
+            ticks_df["run_id"] = run_id
+            metric_frames.append(ticks_df)
+
+        metrics_frame = pd.concat(metric_frames, ignore_index=True) if metric_frames else pd.DataFrame()
+        if not metrics_frame.empty:
+            metrics_frame = metrics_frame.sort_values(["run_id", "step_idx"]).reset_index(drop=True)
+            metrics_frame["density"] = metrics_frame.get("local_density", pd.Series(dtype=float))
+            metrics_frame["stability"] = metrics_frame.get("token_stability", pd.Series(dtype=float))
+            candidate_series = metrics_frame.get("candidate_scores", pd.Series(["[]"] * len(metrics_frame)))
+            metrics_frame["branch_divergence"] = candidate_series.apply(_compute_branch_divergence)
+            phase_change = metrics_frame.groupby("run_id")["phase"].transform(lambda s: s.ne(s.shift()).astype(int))
+            metrics_frame["phase_segment"] = phase_change.groupby(metrics_frame["run_id"]).cumsum()
+            metrics_frame["phase_duration"] = metrics_frame.groupby(["run_id", "phase_segment"]).cumcount() + 1
+            if selected_modes:
+                metrics_frame = metrics_frame[metrics_frame["mode"].isin(selected_modes)]
+            if selected_basins:
+                run_basin = frame[["run_id", "basin"]].drop_duplicates()
+                metrics_frame = metrics_frame.merge(run_basin, on="run_id", how="left")
+                metrics_frame = metrics_frame[metrics_frame["basin"].isin(selected_basins)]
+            else:
+                metrics_frame = metrics_frame.merge(frame[["run_id", "basin"]].drop_duplicates(), on="run_id", how="left")
 
         max_step = int(frame["step_idx"].max())
         selected_step = max(0, min(int(scrub_step if scrub_step is not None else max_step), max_step))
@@ -502,6 +670,12 @@ def create_dash_app(config: AppConfig) -> Dash:
                 f"commit_source={tick.commit_source}\n"
                 f"latent_source={tick.latent_source}\n"
                 f"coherence={tick.coherence:.3f}\n"
+                f"coh_entropy_contrib={tick.coherence_component_entropy:.3f}\n"
+                f"coh_density_contrib={tick.coherence_component_density:.3f}\n"
+                f"coh_stability_contrib={tick.coherence_component_token_stability:.3f}\n"
+                f"coh_smoothness_contrib={tick.coherence_component_smoothness:.3f}\n"
+                f"coh_branch_contrib={tick.coherence_component_branch_agreement:.3f}\n"
+                f"coh_similarity_contrib={tick.coherence_component_known_state_similarity:.3f}\n"
                 f"entropy={tick.entropy:.3f}\n"
                 f"density={tick.local_density:.3f}\n"
                 f"stability={tick.token_stability:.3f}\n"
@@ -520,6 +694,12 @@ def create_dash_app(config: AppConfig) -> Dash:
                 metrics = (
                     f"mode={replay_row.get('mode', 'unknown')}\n"
                     f"phase={replay_row.get('phase', 'unknown')}\n"
+                    f"coh_entropy_contrib={float(replay_row.get('coherence_component_entropy', 0.0)):.3f}\n"
+                    f"coh_density_contrib={float(replay_row.get('coherence_component_density', 0.0)):.3f}\n"
+                    f"coh_stability_contrib={float(replay_row.get('coherence_component_token_stability', 0.0)):.3f}\n"
+                    f"coh_smoothness_contrib={float(replay_row.get('coherence_component_smoothness', 0.0)):.3f}\n"
+                    f"coh_branch_contrib={float(replay_row.get('coherence_component_branch_agreement', 0.0)):.3f}\n"
+                    f"coh_similarity_contrib={float(replay_row.get('coherence_component_known_state_similarity', 0.0)):.3f}\n"
                     f"parent_state={replay_row.get('parent_state_id', '')}\n"
                     f"branch_id={replay_row.get('branch_id', '')}\n"
                     f"branch_score={float(replay_row.get('branch_score', 0.0)):.3f}\n"
@@ -532,7 +712,89 @@ def create_dash_app(config: AppConfig) -> Dash:
                     f"decode_path_diagnostics={replay_row.get('decode_provenance', 'unknown')}"
                 )
 
-        return preview_text, committed_text, metrics, fig, step_info, selected_txt
+        rolling = go.Figure()
+        if not metrics_frame.empty:
+            rolling_window = 5
+            for run_id, run_df in metrics_frame.groupby("run_id"):
+                run_df = run_df.sort_values("step_idx")
+                smoothed = run_df.copy()
+                for col in ["coherence", "density", "smoothness", "stability", "branch_divergence", "phase_duration"]:
+                    if col in smoothed.columns:
+                        smoothed[col] = smoothed[col].rolling(window=rolling_window, min_periods=1).mean()
+                label = str(run_id)[:8]
+                for metric_name in ["coherence", "density", "smoothness", "stability", "branch_divergence", "phase_duration"]:
+                    if metric_name not in smoothed.columns:
+                        continue
+                    rolling.add_trace(
+                        go.Scatter(
+                            x=smoothed["step_idx"],
+                            y=smoothed[metric_name],
+                            mode="lines",
+                            name=f"{metric_name} · {label}",
+                            hovertemplate=f"run={label}<br>step=%{{x}}<br>{metric_name}=%{{y:.3f}}<extra></extra>",
+                        )
+                    )
+        rolling.update_layout(template="plotly_dark", title="Rolling metrics (window=5)", uirevision="rolling-metrics")
+
+        summary_table = _summarize_metrics(metrics_frame)
+        summary_txt = summary_table.to_string(index=False, float_format=lambda v: f"{v:.4f}") if not summary_table.empty else "No summary stats yet."
+        return (
+            preview_text,
+            committed_text,
+            metrics,
+            fig,
+            step_info,
+            selected_txt,
+            rolling,
+            mode_options,
+            selected_modes,
+            basin_options,
+            selected_basins,
+            summary_txt,
+        )
+
+    @app.callback(
+        Output("summary-download", "data"),
+        Input("export-summary-btn", "n_clicks"),
+        State("run-filter", "value"),
+        State("mode-filter", "value"),
+        State("basin-filter", "value"),
+        prevent_initial_call=True,
+    )
+    def export_summary(_, run_filter, mode_filter, basin_filter):
+        frame = controller.atlas.to_frame()
+        if frame.empty:
+            return dcc.send_string("run_id,mode,basin,steps\n", "summary_stats.csv")
+        if run_filter:
+            frame = frame[frame["run_id"].isin(run_filter)]
+        run_basin = frame[["run_id", "basin"]].drop_duplicates()
+        metric_frames = []
+        for run_id in sorted(frame["run_id"].unique()):
+            if run_id == controller.state.run_id and controller.tick_history:
+                ticks_df = pd.DataFrame([tick.__dict__ for tick in controller.tick_history])
+            else:
+                ticks_df = session_store.load_ticks(run_id)
+            if ticks_df.empty:
+                continue
+            ticks_df["run_id"] = run_id
+            metric_frames.append(ticks_df)
+        metrics_frame = pd.concat(metric_frames, ignore_index=True) if metric_frames else pd.DataFrame()
+        if metrics_frame.empty:
+            return dcc.send_string("run_id,mode,basin,steps\n", "summary_stats.csv")
+        metrics_frame["density"] = metrics_frame.get("local_density", pd.Series(dtype=float))
+        metrics_frame["stability"] = metrics_frame.get("token_stability", pd.Series(dtype=float))
+        candidate_series = metrics_frame.get("candidate_scores", pd.Series(["[]"] * len(metrics_frame)))
+        metrics_frame["branch_divergence"] = candidate_series.apply(_compute_branch_divergence)
+        phase_change = metrics_frame.groupby("run_id")["phase"].transform(lambda s: s.ne(s.shift()).astype(int))
+        metrics_frame["phase_segment"] = phase_change.groupby(metrics_frame["run_id"]).cumsum()
+        metrics_frame["phase_duration"] = metrics_frame.groupby(["run_id", "phase_segment"]).cumcount() + 1
+        metrics_frame = metrics_frame.merge(run_basin, on="run_id", how="left")
+        if mode_filter:
+            metrics_frame = metrics_frame[metrics_frame["mode"].isin(mode_filter)]
+        if basin_filter:
+            metrics_frame = metrics_frame[metrics_frame["basin"].isin(basin_filter)]
+        summary = _summarize_metrics(metrics_frame)
+        return dcc.send_string(summary.to_csv(index=False), "summary_stats.csv")
     return app
 
 
