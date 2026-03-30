@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from gguf_dream_lab.backend.atlas.atlas import LatentAtlas, StatePoint, TransitionEdge
 
@@ -195,3 +196,101 @@ def test_compute_attractor_vector_uses_recurrence_and_dwell():
     assert float(stats["mean_recurrence"]) > 0.0
     assert float(stats["mean_dwell_time"]) > 0.0
     assert np.linalg.norm(np.asarray(stats["force_vector"], dtype=np.float32)) > 0.0
+
+
+def test_append_batch_threshold_defers_full_rebuild_but_projects_new_points():
+    atlas = LatentAtlas(rebuild_append_threshold=4, rebuild_interval_seconds=60.0)
+    seed = StatePoint(
+        state_id="s0",
+        run_id="r",
+        run_label="x",
+        basin="narrative",
+        step_idx=0,
+        preview="p",
+        committed="c",
+        coherence=0.5,
+        entropy=0.5,
+        embedding=np.zeros(8, dtype=np.float32),
+    )
+    atlas.append_points([seed])
+    old_labels = atlas.cluster_labels.copy()
+    old_projection = atlas.projection_2d.copy()
+
+    atlas.append_points(
+        [
+            StatePoint(
+                state_id="s1",
+                run_id="r",
+                run_label="x",
+                basin="narrative",
+                step_idx=1,
+                preview="p",
+                committed="c",
+                coherence=0.6,
+                entropy=0.4,
+                embedding=np.ones(8, dtype=np.float32),
+            )
+        ]
+    )
+
+    assert atlas.cluster_labels is not None
+    assert int(atlas.cluster_labels[-1]) == -1
+    assert np.linalg.norm(atlas.projection_2d[-1] - old_projection[0]) > 0.0
+    assert np.array_equal(atlas.cluster_labels[:-1], old_labels)
+
+
+def test_timed_rebuild_interval_triggers_without_hitting_append_threshold(monkeypatch: pytest.MonkeyPatch):
+    atlas = LatentAtlas(rebuild_append_threshold=50, rebuild_interval_seconds=1.0)
+    base = np.zeros(8, dtype=np.float32)
+    atlas.append_points(
+        [
+            StatePoint(
+                state_id="s0",
+                run_id="r",
+                run_label="x",
+                basin="narrative",
+                step_idx=0,
+                preview="p",
+                committed="c",
+                coherence=0.5,
+                entropy=0.5,
+                embedding=base,
+            ),
+            StatePoint(
+                state_id="s1",
+                run_id="r",
+                run_label="x",
+                basin="narrative",
+                step_idx=1,
+                preview="p",
+                committed="c",
+                coherence=0.5,
+                entropy=0.5,
+                embedding=base + 0.1,
+            ),
+        ]
+    )
+
+    atlas._last_rebuild_monotonic = 100.0
+    monkeypatch.setattr("gguf_dream_lab.backend.atlas.atlas.time.monotonic", lambda: 102.0)
+
+    atlas.append_points(
+        [
+            StatePoint(
+                state_id="s2",
+                run_id="r",
+                run_label="x",
+                basin="narrative",
+                step_idx=2,
+                preview="p",
+                committed="c",
+                coherence=0.5,
+                entropy=0.5,
+                embedding=base + 0.2,
+            )
+        ]
+    )
+
+    assert atlas._pending_rebuild_appends == 0
+    assert atlas.nn is not None
+    assert int(atlas.cluster_labels[-1]) >= 0
