@@ -330,7 +330,7 @@ def create_dash_app(config: AppConfig) -> Dash:
         State("scrub-step", "value"),
         prevent_initial_call=False,
     )
-    def sync_run_controls(_, __, select_all, clear_selection, clear_atlas, current_filter, follow_latest, ui_state, scrub_step):
+    def sync_run_controls(_, __, select_all, clear_selection, clear_atlas, follow_latest, current_filter, ui_state, scrub_step):
         trigger = ctx.triggered_id
         if trigger == "clear-atlas-btn":
             controller.atlas.clear()
@@ -508,14 +508,16 @@ def create_dash_app(config: AppConfig) -> Dash:
         Input("basin-filter", "value"),
         Input("timeline-cache", "data"),
         Input("lineage-path", "value"),
+        Input("theme-store", "data"),
     )
-    def refresh_stream(_, scrub_step, run_filter, mode_filter, basin_filter, timeline, lineage_path_id):
+    def refresh_stream(_, scrub_step, run_filter, mode_filter, basin_filter, timeline, lineage_path_id, theme):
+        plotly_template = "plotly_dark" if theme == "dark" else "plotly_white"
         frame = controller.atlas.to_frame()
         if frame.empty:
             fig = px.scatter(x=[0], y=[0], title="No latent states yet")
-            fig.update_layout(template="plotly_dark", uirevision="latent-atlas")
+            fig.update_layout(template=plotly_template, uirevision="latent-atlas")
             metrics_fig = go.Figure()
-            metrics_fig.update_layout(template="plotly_dark", title="Rolling metrics")
+            metrics_fig.update_layout(template=plotly_template, title="Rolling metrics")
             return "", "", "No ticks yet.", fig, "No step selected.", "", metrics_fig, [], [], [], [], "No summary stats yet."
 
         if run_filter:
@@ -532,9 +534,9 @@ def create_dash_app(config: AppConfig) -> Dash:
             frame = frame[frame["basin"].isin(selected_basins)]
         if frame.empty:
             fig = px.scatter(x=[0], y=[0], title="No runs selected")
-            fig.update_layout(template="plotly_dark", uirevision="latent-atlas")
+            fig.update_layout(template=plotly_template, uirevision="latent-atlas")
             metrics_fig = go.Figure()
-            metrics_fig.update_layout(template="plotly_dark", title="Rolling metrics")
+            metrics_fig.update_layout(template=plotly_template, title="Rolling metrics")
             return (
                 "",
                 "",
@@ -632,7 +634,7 @@ def create_dash_app(config: AppConfig) -> Dash:
         if not selected.empty:
             fig.add_scatter(x=selected["x"], y=selected["y"], mode="markers", marker={"size": 16, "color": "#ff4d6d"}, name="selected")
         fig.update_layout(
-            template="plotly_dark",
+            template=plotly_template,
             title="Latent-state atlas (projection only; control stays high-dimensional)",
             uirevision="latent-atlas",
         )
@@ -644,6 +646,10 @@ def create_dash_app(config: AppConfig) -> Dash:
         metrics = "No ticks yet."
         if not selected.empty:
             row = selected.iloc[0]
+            step_info = (
+                f"Selected step: {selected_step} / {max_step} | runs: {frame['run_id'].nunique()} "
+                f"| phase={row['phase']} | run={str(row['run_id'])[:8]}"
+            )
             selected_txt = (
                 f"selected state={row['state_id']} run={row['run_id'][:8]} "
                 f"phase={row['phase']} basin={row['basin']} latent_source={row.get('latent_source', 'unknown')}"
@@ -660,7 +666,11 @@ def create_dash_app(config: AppConfig) -> Dash:
                 f"density={float(row['density']):.3f}\n"
                 f"basin_samples={int(row.get('basin_sample_count', 0))}\n"
                 f"basin_force={float(row.get('basin_force_magnitude', 0.0)):.3f}\n"
-                f"basin_spread={float(row.get('basin_prior_spread', 0.0)):.3f}"
+                f"basin_spread={float(row.get('basin_prior_spread', 0.0)):.3f}\n"
+                f"candidate_scores={row.get('candidate_scores', '[]')}\n"
+                f"rejected_candidates={row.get('rejected_candidates', '[]')}\n"
+                f"selection_trace={row.get('selected_branch_trace', '{}')}\n"
+                f"decode_provenance={row.get('decode_provenance', 'unknown')}"
             )
 
         if tick is not None and selected_step == max_step:
@@ -679,11 +689,17 @@ def create_dash_app(config: AppConfig) -> Dash:
                 f"entropy={tick.entropy:.3f}\n"
                 f"density={tick.local_density:.3f}\n"
                 f"stability={tick.token_stability:.3f}\n"
+                f"branch_id={tick.branch_id}\n"
+                f"branch_score={tick.branch_score:.3f}\n"
+                f"candidate_scores={tick.candidate_scores}\n"
+                f"rejected_candidates={tick.rejected_candidates}\n"
+                f"selection_trace={tick.selected_branch_trace}\n"
                 f"basin_samples={tick.basin_sample_count}\n"
                 f"basin_mean_coherence={tick.basin_mean_coherence:.3f}\n"
                 f"basin_mean_density={tick.basin_mean_density:.3f}\n"
                 f"basin_force={tick.basin_force_magnitude:.3f}\n"
-                f"basin_spread={tick.basin_prior_spread:.3f}"
+                f"basin_spread={tick.basin_prior_spread:.3f}\n"
+                f"decode_provenance={tick.decode_provenance}"
             )
 
         if timeline_ticks:
@@ -734,7 +750,7 @@ def create_dash_app(config: AppConfig) -> Dash:
                             hovertemplate=f"run={label}<br>step=%{{x}}<br>{metric_name}=%{{y:.3f}}<extra></extra>",
                         )
                     )
-        rolling.update_layout(template="plotly_dark", title="Rolling metrics (window=5)", uirevision="rolling-metrics")
+        rolling.update_layout(template=plotly_template, title="Rolling metrics (window=5)", uirevision="rolling-metrics")
 
         summary_table = _summarize_metrics(metrics_frame)
         summary_txt = summary_table.to_string(index=False, float_format=lambda v: f"{v:.4f}") if not summary_table.empty else "No summary stats yet."
