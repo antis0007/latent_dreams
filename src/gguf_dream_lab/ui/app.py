@@ -10,7 +10,7 @@ from gguf_dream_lab.backend.atlas.atlas import AtlasStorage
 from gguf_dream_lab.backend.dream.controller import DreamController
 from gguf_dream_lab.backend.runtime.capability_contracts import RuntimeBehaviorSnapshot, validate_mode_contract
 from gguf_dream_lab.backend.runtime.llama_backend import LlamaCppBackend
-from gguf_dream_lab.config.models import AppConfig, Basin
+from gguf_dream_lab.config.models import AppConfig, Basin, BranchSelectionPolicy
 from gguf_dream_lab.storage.session_store import SessionStore
 
 
@@ -62,6 +62,14 @@ def create_dash_app(config: AppConfig) -> Dash:
                             dcc.Slider(id="noise", min=0.01, max=0.6, step=0.01, value=config.dream.noise_amplitude),
                             html.Label("Branch count", className="control-label"),
                             dcc.Slider(id="branches", min=1, max=5, step=1, value=config.dream.branch_count),
+                            html.Label("Branch policy", className="control-label"),
+                            dcc.Dropdown(
+                                id="branch-policy",
+                                options=[{"label": p.value, "value": p.value} for p in BranchSelectionPolicy],
+                                value=config.dream.branch_selection_policy.value,
+                                className="control-field",
+                                clearable=False,
+                            ),
                             html.Div(
                                 className="button-row",
                                 children=[
@@ -179,9 +187,10 @@ def create_dash_app(config: AppConfig) -> Dash:
         State("tick-hz", "value"),
         State("noise", "value"),
         State("branches", "value"),
+        State("branch-policy", "value"),
         prevent_initial_call=True,
     )
-    def controls(start, pause, resume, stop, prompt, basin, threshold, tick_hz, noise, branches):
+    def controls(start, pause, resume, stop, prompt, basin, threshold, tick_hz, noise, branches, branch_policy):
         trigger = ctx.triggered_id
         if trigger == "start-btn":
             config.dream.prompt = prompt or ""
@@ -190,6 +199,7 @@ def create_dash_app(config: AppConfig) -> Dash:
             config.dream.tick_hz = float(tick_hz)
             config.dream.noise_amplitude = float(noise)
             config.dream.branch_count = int(branches)
+            config.dream.branch_selection_policy = BranchSelectionPolicy(branch_policy)
             controller.start(config.dream)
         elif trigger == "pause-btn":
             controller.pause()
@@ -517,6 +527,8 @@ def create_dash_app(config: AppConfig) -> Dash:
                     f"basin_force={float(replay_row.get('basin_force_magnitude', 0.0)):.3f}\n"
                     f"basin_spread={float(replay_row.get('basin_prior_spread', 0.0)):.3f}\n"
                     f"candidate_scores={replay_row.get('candidate_scores', '[]')}\n"
+                    f"rejected_candidates={replay_row.get('rejected_candidates', '[]')}\n"
+                    f"selection_trace={replay_row.get('selected_branch_trace', '{}')}\n"
                     f"decode_path_diagnostics={replay_row.get('decode_provenance', 'unknown')}"
                 )
 
