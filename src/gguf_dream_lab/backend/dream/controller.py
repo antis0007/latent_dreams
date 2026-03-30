@@ -54,6 +54,8 @@ class DreamTick:
     basin_mean_density: float
     basin_force_magnitude: float
     basin_prior_spread: float
+    navigation_decision: str
+    penalty_breakdown: str
     decode_provenance: str
     status: str
 
@@ -129,6 +131,7 @@ class DreamController:
         prompt = (basin_prefix + " " + cfg.prompt).strip()
         latent = self._seed_latent_state(cfg, prompt)
         prev_vec = latent.latent_vector.copy()
+        self._previous_direction = np.zeros_like(prev_vec)
         anneal = 1.0
 
         while not self._stop_event.is_set():
@@ -219,6 +222,8 @@ class DreamController:
                 basin_mean_density=float(latent.metadata.get("basin_mean_density", 0.0)),
                 basin_force_magnitude=float(latent.metadata.get("basin_force_magnitude", 0.0)),
                 basin_prior_spread=float(latent.metadata.get("basin_prior_spread", 0.0)),
+                navigation_decision=str(latent.metadata.get("navigation_decision", "{}")),
+                penalty_breakdown=str(latent.metadata.get("penalty_breakdown", "{}")),
                 decode_provenance=(
                     f"preview={preview_decode_source};commit={commit_decode_source};"
                     f"preview_cadence={cfg.preview_decode_cadence}"
@@ -290,6 +295,16 @@ class DreamController:
             if prior
             else np.zeros_like(latent.latent_vector, dtype=np.float32)
         )
+        attractor_stats = self.atlas.compute_attractor_vector(
+            basin=latent.basin,
+            ref_vector=latent.latent_vector,
+            top_k=cfg.attractor_top_k,
+        )
+        attractor_force = (
+            self._align_vector_shape(np.asarray(attractor_stats["force_vector"], dtype=np.float32), latent.latent_vector)
+            if attractor_stats
+            else np.zeros_like(latent.latent_vector, dtype=np.float32)
+        )
         candidates = []
         branch_count = max(cfg.branch_count, 1)
         for branch_idx in range(branch_count):
@@ -301,12 +316,18 @@ class DreamController:
                 ((1.0 - cfg.basin_retention) * target)
                 + (cfg.basin_retention * basin_centroid)
                 + (cfg.basin_force_weight * basin_force)
+                + (cfg.attractor_force_weight * attractor_force)
                 + (cfg.basin_drift * (latent.latent_vector - basin_centroid))
+            )
+            constrained_target, target_distance, target_distance_penalty = self._apply_step_constraint(
+                latent.latent_vector,
+                target,
+                max_distance=cfg.max_step_distance,
             )
             perturb = rng.normal(scale=cfg.noise_amplitude * anneal * 0.5, size=target.shape).astype(np.float32)
             proposal = self.runtime.evolve_latent_state(
                 latent,
-                target_vector=target + perturb,
+                target_vector=constrained_target + perturb,
                 noise_scale=cfg.noise_amplitude * anneal,
                 noise_seed=branch_seed,
             )
@@ -322,10 +343,27 @@ class DreamController:
                 weights=cfg.weights,
             )
             distance_to_attractor = self._distance_to_attractor(proposal.latent_vector, basin=proposal.basin)
+            proposed_distance = float(np.linalg.norm(proposal.latent_vector - latent.latent_vector))
+            step_distance_penalty = max(0.0, (proposed_distance - cfg.max_step_distance) / max(cfg.max_step_distance, 1e-6))
+            curvature_penalty = self._curvature_penalty(
+                prev_direction=getattr(self, "_previous_direction", np.zeros_like(proposal.latent_vector)),
+                current=latent.latent_vector,
+                proposed=proposal.latent_vector,
+            )
+            basin_boundary_cost = self._basin_boundary_cost(
+                vec=proposal.latent_vector,
+                centroid=basin_centroid,
+                spread=float(prior.get("prior_spread", 0.0)) if prior else 0.0,
+            )
             branch_score = self._branch_score(
                 coherence_estimate=branch_coherence_estimate,
                 distance_to_attractor=distance_to_attractor,
                 temporal_smoothness=branch_smoothness,
+                step_distance_penalty=step_distance_penalty + target_distance_penalty,
+                curvature_penalty=curvature_penalty,
+                curvature_weight=cfg.curvature_penalty_weight,
+                basin_boundary_cost=basin_boundary_cost,
+                basin_boundary_weight=cfg.basin_boundary_cost_weight,
             )
             distance_penalty = min(distance_to_attractor / 3.0, 1.0)
             proposal.metadata["branch_agreement"] = branch_agreement
@@ -336,10 +374,34 @@ class DreamController:
             proposal.metadata["distance_to_attractor"] = distance_to_attractor
             proposal.metadata["temporal_smoothness"] = branch_smoothness
             proposal.metadata["branch_score"] = branch_score
+            proposal.metadata["penalty_breakdown"] = json.dumps(
+                {
+                    "distance_penalty": float(distance_penalty),
+                    "step_distance_penalty": float(step_distance_penalty + target_distance_penalty),
+                    "curvature_penalty": float(curvature_penalty),
+                    "basin_boundary_cost": float(basin_boundary_cost),
+                }
+            )
+            proposal.metadata["navigation_decision"] = json.dumps(
+                {
+                    "target_distance": float(target_distance),
+                    "max_step_distance": float(cfg.max_step_distance),
+                    "attractor_sample_count": int(attractor_stats.get("sample_count", 0)) if attractor_stats else 0,
+                    "attractor_mean_recurrence": float(attractor_stats.get("mean_recurrence", 0.0))
+                    if attractor_stats
+                    else 0.0,
+                    "attractor_mean_dwell_time": float(attractor_stats.get("mean_dwell_time", 0.0))
+                    if attractor_stats
+                    else 0.0,
+                }
+            )
             proposal.metadata["branch_objective_scores"] = {
                 "coherence_estimate": float(branch_coherence_estimate),
                 "temporal_smoothness": float(branch_smoothness),
                 "distance_penalty": float(distance_penalty),
+                "step_distance_penalty": float(step_distance_penalty + target_distance_penalty),
+                "curvature_penalty": float(curvature_penalty),
+                "basin_boundary_cost": float(basin_boundary_cost),
                 "total_score": float(branch_score),
             }
             proposal.metadata["basin_sample_count"] = int(prior.get("sample_count", 0)) if prior else 0
@@ -414,6 +476,10 @@ class DreamController:
                 "winner_score": float(selected.metadata.get("branch_score", 0.0)),
             }
         )
+        prev_vec = np.asarray(prev_latent.latent_vector, dtype=np.float32).reshape(-1)
+        next_vec = np.asarray(selected.latent_vector, dtype=np.float32).reshape(-1)
+        prev_vec = self._align_vector_shape(prev_vec, next_vec)
+        self._previous_direction = next_vec - prev_vec
         return selected
 
     def _select_rank_by_policy(self, *, scored: list[tuple[int, LatentState]], policy: str | None) -> int:
@@ -485,10 +551,65 @@ class DreamController:
         )
 
     @staticmethod
-    def _branch_score(*, coherence_estimate: float, distance_to_attractor: float, temporal_smoothness: float) -> float:
+    def _branch_score(
+        *,
+        coherence_estimate: float,
+        distance_to_attractor: float,
+        temporal_smoothness: float,
+        step_distance_penalty: float = 0.0,
+        curvature_penalty: float = 0.0,
+        curvature_weight: float = 0.0,
+        basin_boundary_cost: float = 0.0,
+        basin_boundary_weight: float = 0.0,
+    ) -> float:
         distance_penalty = min(distance_to_attractor / 3.0, 1.0)
-        score = (0.65 * coherence_estimate) + (0.25 * temporal_smoothness) - (0.35 * distance_penalty)
+        score = (
+            (0.65 * coherence_estimate)
+            + (0.25 * temporal_smoothness)
+            - (0.35 * distance_penalty)
+            - (0.2 * step_distance_penalty)
+            - (curvature_weight * curvature_penalty)
+            - (basin_boundary_weight * basin_boundary_cost)
+        )
         return float(score)
+
+    @staticmethod
+    def _apply_step_constraint(current: np.ndarray, target: np.ndarray, *, max_distance: float) -> tuple[np.ndarray, float, float]:
+        current = np.asarray(current, dtype=np.float32).reshape(-1)
+        target = np.asarray(target, dtype=np.float32).reshape(-1)
+        target = DreamController._align_vector_shape(target, current)
+        delta = target - current
+        dist = float(np.linalg.norm(delta))
+        if dist <= max_distance:
+            return target, dist, 0.0
+        scaled = current + (delta / max(dist, 1e-9)) * max_distance
+        overflow_penalty = (dist - max_distance) / max(max_distance, 1e-6)
+        return scaled.astype(np.float32), dist, float(overflow_penalty)
+
+    @staticmethod
+    def _curvature_penalty(*, prev_direction: np.ndarray, current: np.ndarray, proposed: np.ndarray) -> float:
+        prev_direction = np.asarray(prev_direction, dtype=np.float32).reshape(-1)
+        current = np.asarray(current, dtype=np.float32).reshape(-1)
+        proposed = np.asarray(proposed, dtype=np.float32).reshape(-1)
+        proposed_direction = proposed - DreamController._align_vector_shape(current, proposed)
+        prev_direction = DreamController._align_vector_shape(prev_direction, proposed_direction)
+        prev_norm = float(np.linalg.norm(prev_direction))
+        next_norm = float(np.linalg.norm(proposed_direction))
+        if prev_norm <= 1e-9 or next_norm <= 1e-9:
+            return 0.0
+        cos = float(np.dot(prev_direction, proposed_direction) / (prev_norm * next_norm + 1e-9))
+        cos = max(-1.0, min(1.0, cos))
+        return float((1.0 - cos) / 2.0)
+
+    @staticmethod
+    def _basin_boundary_cost(*, vec: np.ndarray, centroid: np.ndarray, spread: float) -> float:
+        vec = np.asarray(vec, dtype=np.float32).reshape(-1)
+        centroid = np.asarray(centroid, dtype=np.float32).reshape(-1)
+        centroid = DreamController._align_vector_shape(centroid, vec)
+        if spread <= 1e-9:
+            return 0.0
+        distance = float(np.linalg.norm(vec - centroid))
+        return float(max(0.0, (distance - spread) / (spread + 1e-9)))
 
     @staticmethod
     def _branch_seed(run_id: str, step_idx: int, branch_idx: int) -> int:

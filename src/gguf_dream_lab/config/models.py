@@ -68,6 +68,11 @@ class DreamConfig(BaseModel):
     basin_force_weight: float = Field(default=0.2, ge=0.0, le=1.0)
     basin_retention: float = Field(default=0.65, ge=0.0, le=1.0)
     basin_drift: float = Field(default=0.1, ge=0.0, le=1.0)
+    attractor_force_weight: float = Field(default=0.35, ge=0.0, le=1.0)
+    attractor_top_k: int = Field(default=5, ge=1, le=16)
+    max_step_distance: float = Field(default=1.25, gt=0.0)
+    curvature_penalty_weight: float = Field(default=0.15, ge=0.0, le=1.0)
+    basin_boundary_cost_weight: float = Field(default=0.25, ge=0.0, le=1.0)
     preview_decode_cadence: int = 1
     stability_window: int = 4
     run_label: str = "default"
