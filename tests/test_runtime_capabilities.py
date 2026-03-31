@@ -52,7 +52,7 @@ def test_runtime_load_timeout_falls_back_to_synthetic(tmp_path):
     assert any("timed out" in warning for warning in caps.warnings)
 
 
-def test_stubbed_instrumentation_promotes_true_mode_with_decode_fallback():
+def test_stubbed_instrumentation_promotes_true_mode_without_true_readout():
     class StubbedAdapter:
         def available(self) -> bool:
             return True
@@ -96,11 +96,21 @@ def test_stubbed_instrumentation_promotes_true_mode_with_decode_fallback():
     caps = backend.capabilities()
 
     assert caps.supports_instrumented_latents
-    assert caps.supports_true_latent_readout
+    assert not caps.supports_true_latent_readout
     assert caps.active_mode.value == "true_latent_instrumented"
     assert "layer_16" in caps.capture_sites
     assert any("source=instrumented_stub" in warning for warning in caps.warnings)
     assert "instrumented_stub_capture" in caps.instrumentation_downgrade_reasons
+
+
+def test_production_mode_fails_fast_when_instrumentation_hooks_missing():
+    backend = LlamaCppBackend(RuntimeConfig(model_path=None, instrumented_backend=True, production_mode=True))
+    try:
+        backend.load()
+    except RuntimeError as exc:
+        assert "production mode" in str(exc).lower() or "contract validation failed at startup" in str(exc)
+    else:
+        raise AssertionError("expected production startup to fail when instrumented hooks are missing")
 
 
 def test_decode_commit_from_latent_sets_approx_preview_source_and_avoids_preview_truncation():
@@ -297,6 +307,49 @@ def test_experimental_adapter_no_longer_emits_synthetic_conditioned_preview():
     )
 
     assert adapter.decode_conditioned_preview(capture, max_tokens=8) is None
+
+
+def test_experimental_adapter_exposes_stable_python_latent_api_aliases():
+    class AltHookBackend:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def capture_layer_latent(self, layer=None, sites=None):
+            self.calls.append("capture")
+            return {
+                "layer": layer or 16,
+                "site_id": (sites or ["post_attn_l16"])[0],
+                "latent_vector": np.ones(4, dtype=np.float32),
+                "tensors": {"residual_stream": np.ones(4, dtype=np.float32)},
+                "metadata": {"backend_variant": "llama.cpp.instrumented", "instrumentation_commit": "abc123"},
+            }
+
+        def latent_decode(self, vector, tensors, max_tokens=16):
+            self.calls.append("decode")
+            del tensors, max_tokens
+            return f"decoded:{float(np.mean(vector)):.2f}"
+
+        def inject_latent(self, payload):
+            self.calls.append("reinject")
+            return bool(payload["latent_vector"].size)
+
+    adapter = ExperimentalLlamaForkAdapter(enabled=True)
+    backend = AltHookBackend()
+    adapter.bind_backend(backend)
+
+    capture = adapter.capture()
+    assert capture is not None
+    assert callable(getattr(backend, "capture_latent", None))
+    assert callable(getattr(backend, "latent_capture", None))
+    assert callable(getattr(backend, "decode_from_latent", None))
+    assert callable(getattr(backend, "reinject_latent", None))
+    assert callable(getattr(backend, "get_latent_api_contract", None))
+    assert adapter.decode_conditioned_preview(capture, max_tokens=8) == "decoded:1.00"
+    assert adapter.reinject(capture)
+    contract = backend.get_latent_api_contract()
+    assert contract["capture_api"] == "latent_capture_v1"
+    assert contract["api_version"] == 1
+    assert "capture" in backend.calls and "decode" in backend.calls and "reinject" in backend.calls
 
 
 def test_true_latent_decode_falls_back_to_promptless_latent_exploration():

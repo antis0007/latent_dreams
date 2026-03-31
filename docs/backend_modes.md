@@ -25,7 +25,16 @@ The runtime only exposes `true_latent_instrumented` when **all** of the followin
   - `capture_api`
   - `tensor_dtype`
 - Verification result is not marked as stub/synthetic.
+- Backend latent API contract reports:
+  - `capture_api=latent_capture_v1`
+  - `api_version=1`
+  - callable bindings for capture/decode/reinject.
 
 If any requirement fails, diagnostics and UI must emit explicit `verification_downgrade_reasons`.
+
+### Production mode (`runtime.production_mode=true`)
+- Synthetic instrumented vectors are disabled.
+- Missing backend hooks (`capture_latent` / `latent_capture`) fail fast.
+- Contract mismatches fail clearly at startup before dream loop execution.
 
 > Important: baseline is useful but **not equivalent** to true latent dreaming.
