@@ -32,7 +32,10 @@ class LlamaCppBackend(RuntimeBackend):
         self._llm = None
         self._loaded = False
         self._llama_error: str | None = None
-        self.instrumentation = instrumentation or ExperimentalLlamaForkAdapter(enabled=config.instrumented_backend)
+        self.instrumentation = instrumentation or ExperimentalLlamaForkAdapter(
+            enabled=config.instrumented_backend,
+            strict=config.production_mode,
+        )
 
     def load(self) -> None:
         if self._loaded:
@@ -40,10 +43,12 @@ class LlamaCppBackend(RuntimeBackend):
         model_path = self.config.model_path
         if model_path is None:
             self._llama_error = "No model path configured; using synthetic backend behavior."
+            self._validate_instrumentation_contract_startup()
             self._loaded = True
             return
         if not Path(model_path).exists():
             self._llama_error = f"Model path does not exist: {model_path}"
+            self._validate_instrumentation_contract_startup()
             self._loaded = True
             return
         try:
@@ -87,11 +92,18 @@ class LlamaCppBackend(RuntimeBackend):
                 bind_backend = getattr(self.instrumentation, "bind_backend", None)
                 if callable(bind_backend):
                     bind_backend(self._llm)
+                self._validate_instrumentation_contract_startup()
                 logger.info("Loaded GGUF model: %s", model_path)
+        except RuntimeError:
+            if self.config.production_mode:
+                raise
+            self._llama_error = "Production instrumentation contract failure ignored outside production mode."
+            logger.warning(self._llama_error)
         except Exception as exc:  # graceful degradation path
             self._llama_error = f"Failed to initialize llama-cpp-python: {exc}"
             logger.warning(self._llama_error)
         self._loaded = True
+        self._validate_instrumentation_contract_startup()
 
     def teardown(self) -> None:
         self._llm = None
@@ -203,6 +215,10 @@ class LlamaCppBackend(RuntimeBackend):
             cap = self.instrumentation.capture()
             if cap is not None:
                 return self._state_from_capture(run_id, basin, mode, cap)
+            if self.config.production_mode:
+                raise RuntimeError(
+                    "Instrumented latent capture requested in production_mode, but capture hooks returned no tensors."
+                )
             return LatentState(
                 run_id=run_id,
                 basin=basin,
@@ -416,6 +432,11 @@ class LlamaCppBackend(RuntimeBackend):
 
     @staticmethod
     def _state_from_capture(run_id: str, basin: str, mode: DreamMode, cap: LatentCapture) -> LatentState:
+        metadata = dict(cap.metadata)
+        metadata.setdefault("backend_variant", "llama.cpp.instrumented")
+        metadata.setdefault("instrumentation_commit", "unknown")
+        metadata.setdefault("capture_api", "latent_capture_v1")
+        metadata.setdefault("tensor_dtype", str(np.asarray(cap.vector, dtype=np.float32).dtype))
         return LatentState(
             run_id=run_id,
             basin=basin,
@@ -425,14 +446,26 @@ class LlamaCppBackend(RuntimeBackend):
             latent_source=LatentSource.TRUE_TENSOR_CAPTURE,
             layer_id=cap.layer,
             auxiliary_vectors={k: np.asarray(v, dtype=np.float32) for k, v in cap.tensors.items()},
-            metadata=dict(cap.metadata),
+            metadata=metadata,
+        )
+
+    def _validate_instrumentation_contract_startup(self) -> None:
+        if not self.config.instrumented_backend:
+            return
+        verification: InstrumentationVerification = self.instrumentation.verify_backend_evidence()
+        if not self.config.production_mode:
+            return
+        if verification.verified:
+            return
+        reasons = ", ".join(verification.downgrade_reasons) or "unspecified_contract_failure"
+        raise RuntimeError(
+            "Production instrumentation contract validation failed at startup: "
+            f"source={verification.source}; reasons=[{reasons}]"
         )
 
     def _instrumentation_supports_true_readout(self) -> bool:
         supports = getattr(self.instrumentation, "supports_true_readout", None)
-        if callable(supports) and bool(supports()):
-            return True
-        return self.instrumentation.available()
+        return bool(callable(supports) and supports())
 
     def _decode_from_latent_exploration(self, capture: LatentCapture, *, max_tokens: int) -> str:
         signal = self._latent_decode_signal(capture)

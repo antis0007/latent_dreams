@@ -39,6 +39,7 @@ class RuntimeConfig(BaseModel):
     seed: int = 42
     prefer_true_latent: bool = True
     instrumented_backend: bool = False
+    production_mode: bool = False
     load_timeout_sec: float = 20.0
 
 
