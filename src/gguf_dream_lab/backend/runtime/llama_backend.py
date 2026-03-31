@@ -356,56 +356,54 @@ class LlamaCppBackend(RuntimeBackend):
             return self.decode_true_latent_readout_preview(state, max_tokens=max_tokens)
 
         state.metadata["commit_source"] = "approximate_prompt_synthesis"
-        self.load()
-        if self._llm is not None:
-            context = state.committed_prefix.strip()
-            phase = str(state.phase.value).replace("_", " ").lower()
-            latent_vec = np.asarray(state.latent_vector, dtype=np.float32).reshape(-1)
-            if latent_vec.size:
-                top_idx = np.argsort(np.abs(latent_vec))[-6:]
-                anchors = ", ".join(f"f{int(i)}:{float(latent_vec[i]):+.2f}" for i in top_idx)
-            else:
-                anchors = "none"
-            prompt = (
-                "Synthesize one concise committed memory fragment for a dream journal.\n"
-                f"Latent anchors: {anchors}\n"
-                f"Dream phase: {phase}\n"
-                f"Already committed context: {context or '[none]'}\n"
-                "Return only the fragment text:"
-            )
-            try:
-                out = self._llm(
-                    prompt,
-                    max_tokens=max(8, int(max_tokens)),
-                    temperature=min(1.15, max(0.15, self.config.temperature)),
-                    top_k=max(20, int(self.config.top_k)),
-                    top_p=min(0.98, max(0.55, self.config.top_p)),
-                    repeat_penalty=max(1.0, self.config.repeat_penalty),
-                    echo=False,
-                    stream=False,
-                )
-                text = out["choices"][0]["text"].strip()
-                if text:
-                    return text
-            except Exception:
-                pass
-
-        # Fallback synthesis path for synthetic mode: deterministic but independent
-        # from preview-token truncation.
-        hash_seed = abs(hash(state.latent_vector.tobytes()[64:128])) % (2**32)
+        # Commit decode in synthetic mode is intentionally promptless and does not
+        # depend on language-model sampling. This keeps commitments stable for the
+        # same latent trajectory and makes memory chunks reproducible across runs.
+        latent_vec = np.asarray(state.latent_vector, dtype=np.float32).reshape(-1)
+        anchor_slice = latent_vec[64:128] if latent_vec.size >= 128 else latent_vec
+        hash_seed = abs(hash(anchor_slice.tobytes())) % (2**32)
         rng = np.random.default_rng(hash_seed)
-        lex = [
-            "a lantern hums under rain",
-            "footsteps fold into velvet static",
-            "glass corridors breathe moonlit dust",
-            "a paper clock forgets the hour",
-            "the shoreline mirrors a distant voice",
-            "hushed signals drift through midnight rooms",
-            "memory bends around an open threshold",
-            "the city exhales in silver echoes",
-        ]
+        phase = str(state.phase.value).replace("_", " ").lower()
+        context = state.committed_prefix.strip()
+        context_tail = ""
+        if context:
+            context_tail = context.split(".")[-1].strip().split(",")[-1].strip()
+
+        phase_lex: dict[str, list[str]] = {
+            "hypnagogic": [
+                "a threshold of static begins to glow",
+                "room edges soften into drifting signal",
+                "a first image trembles behind closed eyes",
+            ],
+            "nrem": [
+                "quiet architecture settles into repeating loops",
+                "memory corridors fold into low-frequency echoes",
+                "the scene stabilizes with deliberate, muted motion",
+            ],
+            "rem": [
+                "symbols braid quickly through luminous weather",
+                "the city pivots and speaks in mirror-phrases",
+                "a vivid pulse carries meaning without grammar",
+            ],
+            "awake": [
+                "the dream residue condenses into a clear shard",
+                "fragments align as the signal returns to daylight",
+                "one surviving image anchors the waking narrative",
+            ],
+        }
+        lex = phase_lex.get(
+            phase,
+            [
+                "a latent contour resolves into a memory fragment",
+                "the scene returns as a coherent symbolic trace",
+                "a soft landmark remains from the dream basin",
+            ],
+        )
         span = max(1, min(3, max_tokens // 8))
-        return ". ".join(rng.choice(lex, size=span, replace=False).tolist())
+        core = ". ".join(rng.choice(lex, size=span, replace=False).tolist())
+        if context_tail:
+            return f"{core}. It continues from {context_tail.lower()}"
+        return core
 
     def benchmark(self, prompt: str, steps: int = 16) -> dict[str, Any]:
         self.load()
