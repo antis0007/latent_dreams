@@ -88,10 +88,31 @@ class LatentAtlas:
     _last_rebuild_monotonic: float = field(default_factory=time.monotonic, init=False, repr=False, compare=False)
     _projection_basis: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
 
+    def _target_embedding_dim(self) -> int | None:
+        if not self.points:
+            return None
+        return int(self.points[0].embedding.shape[0])
+
+    @staticmethod
+    def _align_embedding(vec: np.ndarray, target_dim: int) -> np.ndarray:
+        arr = np.asarray(vec, dtype=np.float32).reshape(-1)
+        if arr.shape[0] == target_dim:
+            return arr
+        aligned = np.zeros((target_dim,), dtype=np.float32)
+        upto = min(arr.shape[0], target_dim)
+        aligned[:upto] = arr[:upto]
+        return aligned
+
     def append_points(self, new_points: list[StatePoint]) -> None:
         with self._lock:
             if not new_points:
                 return
+            target_dim = self._target_embedding_dim()
+            if target_dim is None and new_points:
+                target_dim = int(np.asarray(new_points[0].embedding).reshape(-1).shape[0])
+            if target_dim is not None:
+                for point in new_points:
+                    point.embedding = self._align_embedding(point.embedding, target_dim)
             start_idx = len(self.points)
             self.points.extend(new_points)
             self._project_new_points_temporarily(start_idx=start_idx)
@@ -122,6 +143,9 @@ class LatentAtlas:
     def append_latent_state(self, state: LatentState, *, run_label: str, step_idx: int) -> StatePoint:
         with self._lock:
             embedding = np.asarray(state.latent_vector, dtype=np.float32)
+            target_dim = self._target_embedding_dim()
+            if target_dim is not None:
+                embedding = self._align_embedding(embedding, target_dim)
             matched_idx = self._nearest_prior_index(embedding, state.basin)
             attractor_id = state.state_id
             recurrence = 0
