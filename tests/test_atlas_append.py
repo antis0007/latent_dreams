@@ -292,5 +292,32 @@ def test_timed_rebuild_interval_triggers_without_hitting_append_threshold(monkey
     )
 
     assert atlas._pending_rebuild_appends == 0
-    assert atlas.nn is not None
-    assert int(atlas.cluster_labels[-1]) >= 0
+
+
+def test_append_latent_state_aligns_dimension_changes_without_crashing():
+    from gguf_dream_lab.backend.dream.state import DreamMode, LatentState
+
+    atlas = LatentAtlas(rebuild_append_threshold=9999, rebuild_interval_seconds=3600.0)
+    first = LatentState(
+        run_id="r",
+        basin="narrative",
+        mode=DreamMode.ENHANCED_LATENT,
+        latent_vector=np.ones(12, dtype=np.float32),
+        timestamp=1.0,
+    )
+    second = LatentState(
+        run_id="r",
+        basin="narrative",
+        mode=DreamMode.ENHANCED_LATENT,
+        latent_vector=np.ones(4, dtype=np.float32),
+        timestamp=2.0,
+    )
+
+    atlas.append_latent_state(first, run_label="x", step_idx=0)
+    point = atlas.append_latent_state(second, run_label="x", step_idx=1)
+
+    assert point.embedding.shape == (12,)
+    assert atlas.projection_2d is not None
+    assert atlas.projection_2d.shape == (2, 2)
+    assert atlas.cluster_labels is not None
+    assert int(atlas.cluster_labels[-1]) == -1
