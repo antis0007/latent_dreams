@@ -142,6 +142,7 @@ class DreamController:
         self._previous_direction = np.zeros_like(prev_vec)
         anneal = 1.0
         coherence_window: deque[float] = deque(maxlen=8)
+        stagnation_window: deque[str] = deque(maxlen=max(2, int(cfg.stagnation_window)))
 
         while not self._stop_event.is_set():
             if self._pause_event.is_set():
@@ -151,7 +152,16 @@ class DreamController:
             tick_start = time.perf_counter()
             phase = self._phase_for_step(self.state.step_idx)
             recent_coherence = float(np.mean(coherence_window)) if coherence_window else latent.coherence
-            adaptive_noise = self._adaptive_noise(cfg, anneal=anneal, recent_coherence=recent_coherence)
+            stagnation_level = self._stagnation_level(
+                stagnation_window,
+                similarity_threshold=cfg.stagnation_similarity_threshold,
+            )
+            adaptive_noise = self._adaptive_noise(
+                cfg,
+                anneal=anneal,
+                recent_coherence=recent_coherence,
+                stagnation_level=stagnation_level,
+            )
             adaptive_attractor = self._adaptive_attractor_weight(cfg, recent_coherence=recent_coherence)
             candidates = self._branch_candidates(
                 latent,
@@ -175,6 +185,7 @@ class DreamController:
             else:
                 preview_decode_source = "preview_cache_hold"
             preview_history.append(self.state.preview_text)
+            stagnation_window.append(self.state.preview_text)
             token_stability = self._token_stability(preview_history)
 
             local_density = self._estimate_local_density(latent.latent_vector)
@@ -406,6 +417,7 @@ class DreamController:
                 centroid=basin_centroid,
                 spread=float(prior.get("prior_spread", 0.0)) if prior else 0.0,
             )
+            novelty_bonus = float(cfg.novelty_bonus_weight) * self._novelty_score(proposal.latent_vector)
             branch_score = self._branch_score(
                 coherence_estimate=branch_coherence_estimate,
                 distance_to_attractor=distance_to_attractor,
@@ -415,6 +427,7 @@ class DreamController:
                 curvature_weight=cfg.curvature_penalty_weight,
                 basin_boundary_cost=basin_boundary_cost,
                 basin_boundary_weight=cfg.basin_boundary_cost_weight,
+                novelty_bonus=novelty_bonus,
             )
             distance_penalty = min(distance_to_attractor / 3.0, 1.0)
             proposal.metadata["branch_agreement"] = branch_agreement
@@ -431,6 +444,7 @@ class DreamController:
                     "step_distance_penalty": float(step_distance_penalty + target_distance_penalty),
                     "curvature_penalty": float(curvature_penalty),
                     "basin_boundary_cost": float(basin_boundary_cost),
+                    "novelty_bonus": float(novelty_bonus),
                 }
             )
             proposal.metadata["navigation_decision"] = json.dumps(
@@ -455,6 +469,7 @@ class DreamController:
                 "step_distance_penalty": float(step_distance_penalty + target_distance_penalty),
                 "curvature_penalty": float(curvature_penalty),
                 "basin_boundary_cost": float(basin_boundary_cost),
+                "novelty_bonus": float(novelty_bonus),
                 "total_score": float(branch_score),
             }
             proposal.metadata["basin_sample_count"] = int(prior.get("sample_count", 0)) if prior else 0
@@ -570,12 +585,19 @@ class DreamController:
         return "decode_unavailable_true_latent_required"
 
     @staticmethod
-    def _adaptive_noise(cfg: DreamConfig, *, anneal: float, recent_coherence: float) -> float:
+    def _adaptive_noise(
+        cfg: DreamConfig,
+        *,
+        anneal: float,
+        recent_coherence: float,
+        stagnation_level: float = 0.0,
+    ) -> float:
         coherence_term = max(0.0, min(1.0, recent_coherence))
         reduction = cfg.coherence_gain * coherence_term
         floor = max(0.01, cfg.noise_amplitude * cfg.exploration_floor)
         adaptive = (cfg.noise_amplitude * anneal) * (1.0 - reduction)
-        return float(max(floor, adaptive))
+        reheat = cfg.noise_amplitude * cfg.stagnation_reheat_gain * max(0.0, min(1.0, stagnation_level))
+        return float(min(cfg.noise_amplitude * 1.5, max(floor, adaptive + reheat)))
 
     @staticmethod
     def _adaptive_attractor_weight(cfg: DreamConfig, *, recent_coherence: float) -> float:
@@ -597,6 +619,17 @@ class DreamController:
             return 0.0
         dists = [float(np.linalg.norm(self._align_vector_shape(p.embedding, vec) - vec)) for p in attractors]
         return min(dists) if dists else 0.0
+
+    def _novelty_score(self, vec: np.ndarray) -> float:
+        if not self.atlas.points:
+            return 1.0
+        mat = np.stack([self._align_vector_shape(p.embedding, vec) for p in self.atlas.points], axis=0)
+        dists = np.linalg.norm(mat - vec.reshape(1, -1), axis=1)
+        if dists.size == 0:
+            return 1.0
+        nearest = np.sort(dists)[: min(6, len(dists))]
+        mean_dist = float(np.mean(nearest))
+        return float(max(0.0, min(1.0, mean_dist)))
 
     def _branch_coherence_estimate(
         self,
@@ -628,6 +661,7 @@ class DreamController:
         curvature_weight: float = 0.0,
         basin_boundary_cost: float = 0.0,
         basin_boundary_weight: float = 0.0,
+        novelty_bonus: float = 0.0,
     ) -> float:
         distance_penalty = min(distance_to_attractor / 3.0, 1.0)
         score = (
@@ -637,6 +671,7 @@ class DreamController:
             - (0.2 * step_distance_penalty)
             - (curvature_weight * curvature_penalty)
             - (basin_boundary_weight * basin_boundary_cost)
+            + novelty_bonus
         )
         return float(score)
 
@@ -760,6 +795,16 @@ class DreamController:
         if not overlaps:
             return 0.0
         return float(sum(overlaps) / len(overlaps))
+
+    @staticmethod
+    def _stagnation_level(history: deque[str], *, similarity_threshold: float) -> float:
+        if len(history) < 2:
+            return 0.0
+        stability = DreamController._token_stability(history)
+        if stability <= similarity_threshold:
+            return 0.0
+        denom = max(1e-6, 1.0 - similarity_threshold)
+        return float(max(0.0, min(1.0, (stability - similarity_threshold) / denom)))
 
     @staticmethod
     def _should_commit(coherence: float, history: deque[str], cfg: DreamConfig) -> bool:

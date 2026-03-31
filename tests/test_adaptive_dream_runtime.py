@@ -18,11 +18,30 @@ class _RecorderLLM:
 def test_adaptive_noise_respects_floor_and_decreases_with_coherence():
     cfg = DreamConfig(noise_amplitude=0.4, exploration_floor=0.3, coherence_gain=0.8)
 
-    low = DreamController._adaptive_noise(cfg, anneal=1.0, recent_coherence=0.0)
-    high = DreamController._adaptive_noise(cfg, anneal=1.0, recent_coherence=1.0)
+    low = DreamController._adaptive_noise(cfg, anneal=1.0, recent_coherence=0.0, stagnation_level=0.0)
+    high = DreamController._adaptive_noise(cfg, anneal=1.0, recent_coherence=1.0, stagnation_level=0.0)
 
     assert low > high
     assert high >= cfg.noise_amplitude * cfg.exploration_floor
+
+
+def test_adaptive_noise_reheats_when_stagnating():
+    cfg = DreamConfig(noise_amplitude=0.2, exploration_floor=0.2, coherence_gain=0.8, stagnation_reheat_gain=0.9)
+
+    baseline = DreamController._adaptive_noise(cfg, anneal=0.5, recent_coherence=0.9, stagnation_level=0.0)
+    reheated = DreamController._adaptive_noise(cfg, anneal=0.5, recent_coherence=0.9, stagnation_level=1.0)
+
+    assert reheated > baseline
+
+
+def test_stagnation_level_grows_with_repeated_previews():
+    repeated = ["same dream fragment"] * 6
+    varied = ["a cat", "a tunnel", "a skyline", "a whisper", "a river", "a storm"]
+
+    repeated_score = DreamController._stagnation_level(repeated, similarity_threshold=0.8)
+    varied_score = DreamController._stagnation_level(varied, similarity_threshold=0.8)
+
+    assert repeated_score > varied_score
 
 
 def test_adaptive_attractor_weight_increases_with_coherence():

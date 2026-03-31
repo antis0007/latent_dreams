@@ -76,6 +76,10 @@ class DreamConfig(BaseModel):
     max_step_distance: float = Field(default=1.25, gt=0.0)
     curvature_penalty_weight: float = Field(default=0.15, ge=0.0, le=1.0)
     basin_boundary_cost_weight: float = Field(default=0.25, ge=0.0, le=1.0)
+    novelty_bonus_weight: float = Field(default=0.2, ge=0.0, le=1.0)
+    stagnation_window: int = Field(default=6, ge=2, le=24)
+    stagnation_similarity_threshold: float = Field(default=0.9, ge=0.0, le=1.0)
+    stagnation_reheat_gain: float = Field(default=0.75, ge=0.0, le=2.0)
     preview_decode_cadence: int = 1
     stability_window: int = 4
     run_label: str = "default"
